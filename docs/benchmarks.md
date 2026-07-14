@@ -104,23 +104,62 @@ Mitigations, in order of cheapness: exclude ARAM (16 MiB of mostly audio — rol
 is unnecessary, and it shrinks the GetWriteWatch scan too); non-temporal stores (est. 1.3–1.5x);
 raise input delay to shrink D; exclude known-static regions once we have a memory map.
 
-## Part 2 — In-Dolphin measurements (BLOCKED)
+## Part 2 — In-Dolphin measurement (mechanism validated; full-race number pending)
 
-These require the fork to build and cannot be faked standalone:
+The `rollback/tracked-arena` fork boots MKDD (verified-clean Redump dump, GM4E01) with
+`Config::MAIN_ROLLBACK_TRACK_MEMORY = True`. This is simultaneously the correctness test for the
+tracked arena and the first real dirty-page measurement.
+
+### Result: the arena surgery works on a live game
+
+The game boots, compiles shaders, and runs. **No panic, no desync, no MapInMemoryRegion guard
+hit, no fastmem failure** — so private write-watched memory with the fastmem arena off and
+page-table fastmem on is a working configuration for a real game, not just the unit test.
+
+Arena is one write-watched block of 16448 pages (67 MB): 8192 (MEM1, 24 MB → next-pow2 32 MB) +
+64 (L1 cache) + 8192 (fake VMEM). A single GetWriteWatch() covers all of it.
+
+### Dirty pages/frame — attract-mode demo racing (~90 s run)
+
+| window | mean | min | max | est. snapshot @ mean |
+|---|---|---|---|---|
+| 600 frames | 229 | 6 | 16448 | 0.16 ms |
+| 1200 | 257 | 6 | 16448 | 0.19 ms |
+| 1800 | 274 | 6 | 16448 | 0.20 ms |
+| 2400 | 283 | 6 | 16448 | 0.20 ms |
+
+- **mean ~230–283 pages/frame → ~0.2 ms snapshot**, an order of magnitude under the 16.67 ms
+  frame budget and well under the ~1000 (Slippi-parity) mark. Strongly positive.
+- **min 6**: idle menu/title frames.
+- **max 16448 = the entire arena**: this is the one-time boot `Memory::Clear()` memset, not a
+  per-frame gameplay cost (identical across every window because the stat is cumulative; a real
+  per-frame spike would move it). Design note: a track *load* also writes large regions, so
+  loads must never sit inside a rollback window — they don't, since rollback only spans a race.
+
+### Important caveat: this is attract mode, not a live 2-player race
+
+MKDD's attract loop *is* real race simulation (CPU karts driving actual tracks), so ~280 is a
+representative gameplay figure — but a full 2-human race with items, 8 racers, and traffic-heavy
+tracks will be somewhat higher. The order of magnitude (few hundred pages) makes it very likely
+to stay comfortable, but the **definitive number needs an actual race**, which requires gameplay
+input (a human playing, or a TAS input movie). Reproduce with:
+
+```
+Dolphin.exe -b -e "<mkdd>.rvz" -u <userdir>
+# userdir/Config/Dolphin.ini : [Core] RollbackTrackMemory = True
+# userdir/Config/Logger.ini  : [Options] Verbosity=4, WriteToFile=True ; [Logs] MI = True
+# read userdir/Logs/dolphin.log
+```
+
+### Still to measure
 
 | Benchmark | Why it matters | Status |
 |---|---|---|
-| MKDD dirty pages/frame, 2P race | **The decisive unknown** — indexes into the table above | blocked |
-| MKDD CPU-only frame cost (no render) | the other half of `(cpu_emu + snapshot)` | blocked |
-| Full savestate save/load baseline | confirms mainline's path is unusable (expect ~11/~67 ms) | blocked |
-| JIT-cache-preserving restore | mainline's savestate *load* is dominated by the PowerPC namespace | blocked |
+| Dirty pages in a live 2P race | the definitive figure (attract mode ≈ 280 is a proxy) | needs gameplay input |
+| MKDD CPU-only frame cost (no render) | the other half of `(cpu_emu + snapshot)` per resim frame | pending |
+| Full savestate save/load baseline | confirms mainline's path is unusable (expect ~11/~67 ms) | pending |
 
-**Blocked on build prerequisites** (need user action — see project README / final report):
-1. **Disk**: 9.3 GB free on C:. Need ~30 GB (VS2022 C++ workload ~10 GB, Dolphin source +
-   submodules ~2 GB, build artifacts ~10 GB).
-2. **VS2022 C++ workload is not installed.** VS2022 17.14 is present but has no MSVC toolset;
-   the only C++ compiler on this machine is VS2019's MSVC 14.24 (used for the benchmarks
-   above). Dolphin mainline requires VS2022 + C++20.
-3. **Windows 11 SDK.** Newest installed is 10.0.18362 (Win10 1903); Dolphin needs 10.0.22621+.
+### Prerequisites (all resolved 2026-07-14)
 
-Nice-to-have: `gh` CLI (absent) for forking; git is 2.29 (old but workable).
+Disk (9.3 → 64.7 GB), VS2022 C++ workload (MSVC 14.44), Windows 11 SDK 10.0.26100, CMake 4.4.0
+(glslang builds through it), gh 2.96. Fork at github.com/NikhilMishra/dolphin.
