@@ -47,20 +47,37 @@ shared section can be mapped twice. But `MEM_WRITE_WATCH` is a `VirtualAlloc` fl
 **private** committed memory and does not work on mapped views. So write-watch is *not* a
 drop-in on stock Dolphin.
 
-Prior art confirms and resolves this: `FaultyPine/incremental-rollback` "replaced Dolphin's
-allocation logic with a single call to allocate a big block of (tracked) memory," which in
-turn forced them to write their **own fastmem implementation**. So the work is real but proven.
+**What the prior art actually is** (read the source, 2026-07-14 — an earlier note here, based on
+a summary rather than the code, was wrong): `FaultyPine/incremental-rollback` is **not a Dolphin
+fork**. It is a standalone synthetic benchmark, much like our `tools/bench/`. Its author did
+separately patch Dolphin — "replaced Dolphin's allocation logic with a single call to allocate a
+big block of (tracked) memory" — but only to *measure* Brawl's dirty-page count (~1500/frame),
+and they explicitly **left the fastmem regions out** of the tracked block. (The README's "custom
+fastmem implementation" refers to *Dolphin's* fastmem, not one they wrote.) Its ~1 ms / ~16 ms
+figures are synthetic, not from a working rollback build.
+
+So **no working implementation of this exists to copy.** We are building it.
+
+The seam that makes it tractable: Dolphin already ships a **`MAIN_FASTMEM_ARENA`** config
+(`Config::MAIN_FASTMEM_ARENA`, exposed in the UI as "Disable Fastmem Arena") that is separate
+from `MAIN_FASTMEM` and `MAIN_PAGE_TABLE_FASTMEM`. With the fastmem *arena* off,
+`InitFastmemArena()` never runs, no aliased mirror views are created, and guest memory is
+reached only through the anonymous `CreateView` pointers (`m_ram`, `m_l1_cache`, `m_fake_vmem`).
+**Aliasing is what forces the shared section — remove the requirement and private
+write-watched memory becomes legal.** Page-table fastmem can remain on, so we do not fall all
+the way back to the slow interpreter path.
 
 Options, in preference order:
-1. **Replace the arena with private write-watched memory + custom fastmem** (the
-   incremental-rollback path). Keeps the generic no-RE-needed snapshot design. Read their
-   source before writing ours.
-2. **Run with fastmem disabled** over a flat write-watched arena. Much simpler, no mirroring
-   problem, but costs emulation speed — and resim frames are exactly where we cannot afford
-   it. Viable fallback if (1) proves too invasive.
-3. **Slippi-style targeted region copy.** No dirty tracking at all; copy known MKDD gameplay
-   regions every frame. Bandwidth cost is comparable, but it needs a reverse-engineered MKDD
-   memory map (the months of work we were trying to avoid). Last resort.
+1. **Tracked-arena mode**: with `FASTMEM_ARENA` off, back the arena with one private
+   `VirtualAlloc(MEM_WRITE_WATCH)` block and make `CreateView` return `block + offset` (pointer
+   arithmetic, no mapping). Small, contained delta to `MemArenaWin.cpp`. Costs some emulation
+   speed vs. arena fastmem — measure it, since resim frames are where we can least afford it.
+2. **Keep arena fastmem; drop OS dirty bits.** Copy guest RAM wholesale each frame (MEM1 is only
+   24 MiB → ~2.2 ms single-threaded, likely <1 ms across threads). No arena surgery at all.
+   Worth benchmarking as a serious contender if (1)'s fastmem loss proves expensive.
+3. **Slippi-style targeted region copy.** No dirty tracking; copy known MKDD gameplay regions
+   every frame. Needs a reverse-engineered MKDD memory map — the months of work we are trying to
+   avoid. Last resort.
 
 **Known risk (unchanged)**: mainline's savestate *load* is dominated by the PowerPC namespace
 (~55–60 ms — likely JIT/icache invalidation). The restore path must not flush the JIT cache.
