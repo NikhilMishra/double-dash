@@ -21,18 +21,47 @@ mode. This is the Slippi/Project Rio school: netcode lives in the emulator, not 
 Slippi hand-reverse-engineered a Melee memory-region list to get ~1 ms savestates. We instead
 track dirty pages generically:
 
-- Allocate the emulated-RAM arena with `MEM_WRITE_WATCH`; use `GetWriteWatch` per frame to
-  collect dirtied 4 KiB pages (~1 ms proven for Brawl by `FaultyPine/incremental-rollback`;
-  same idea as Dolphin draft PR #12911).
+- Track dirtied 4 KiB pages per frame via Windows `GetWriteWatch` (see the arena problem
+  below); same idea as Dolphin draft PR #12911 and `FaultyPine/incremental-rollback`.
 - Per-frame delta = dirtied pages + small serialized non-RAM subsystem state (CPU regs,
   scheduler events, SI/EXI, DSP) via a targeted fast path that must NOT flush the JIT cache.
 - Ring buffer of deltas covering the rollback window; restore = walk deltas back to frame N.
 - Full-memory deltas restore RNG and all game state automatically — zero game-specific
   memory knowledge needed. This is the key simplification vs. Slippi.
 
-**Known risk**: mainline's savestate *load* cost is dominated by the PowerPC namespace
-(~55–60 ms — likely JIT/icache invalidation). Phase 0 profiles this; the fast path must keep
-restore ~1 ms. FaultyPine's numbers show it's achievable.
+Measured cost model (Phase 0, `docs/benchmarks.md`): `snapshot_ms ≈ 0.3 + dirty_pages × 2.2 µs`.
+It is pure memory bandwidth — 8 KiB of traffic per dirty page at this machine's single-core
+cold-copy ceiling. Coalescing contiguous dirty runs into single memcpys and de-duplicating
+pages across the restore window are load-bearing (1.6x / 3x), not optional.
+
+### The arena problem (found 2026-07-14, corrects the original plan)
+
+**`MEM_WRITE_WATCH` cannot be applied to Dolphin's emulated RAM as mainline allocates it.**
+`Source/Core/Common/MemArenaWin.cpp` backs guest memory with a *pagefile-backed section*
+(`CreateFileMapping(INVALID_HANDLE_VALUE, …)`) and maps views of it with `MapViewOfFileEx` /
+`MapViewOfFile3`. It must: fastmem mirrors the same physical memory at several virtual
+addresses (GC MEM1 is visible cached at 0x8000_0000 and uncached at 0xC000_0000), and only a
+shared section can be mapped twice. But `MEM_WRITE_WATCH` is a `VirtualAlloc` flag for
+**private** committed memory and does not work on mapped views. So write-watch is *not* a
+drop-in on stock Dolphin.
+
+Prior art confirms and resolves this: `FaultyPine/incremental-rollback` "replaced Dolphin's
+allocation logic with a single call to allocate a big block of (tracked) memory," which in
+turn forced them to write their **own fastmem implementation**. So the work is real but proven.
+
+Options, in preference order:
+1. **Replace the arena with private write-watched memory + custom fastmem** (the
+   incremental-rollback path). Keeps the generic no-RE-needed snapshot design. Read their
+   source before writing ours.
+2. **Run with fastmem disabled** over a flat write-watched arena. Much simpler, no mirroring
+   problem, but costs emulation speed — and resim frames are exactly where we cannot afford
+   it. Viable fallback if (1) proves too invasive.
+3. **Slippi-style targeted region copy.** No dirty tracking at all; copy known MKDD gameplay
+   regions every frame. Bandwidth cost is comparable, but it needs a reverse-engineered MKDD
+   memory map (the months of work we were trying to avoid). Last resort.
+
+**Known risk (unchanged)**: mainline's savestate *load* is dominated by the PowerPC namespace
+(~55–60 ms — likely JIT/icache invalidation). The restore path must not flush the JIT cache.
 
 ## Networking (Phase 2)
 
