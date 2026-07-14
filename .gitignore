@@ -2,6 +2,7 @@
 /dolphin/
 
 # Local-only: game dumps never belong in the repo
+/game/
 *.iso
 *.rvz
 *.gcm
