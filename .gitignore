@@ -1,0 +1,7 @@
+# The Dolphin fork is its own git repo (cloned separately, not a submodule yet)
+/dolphin/
+
+# Local-only: game dumps never belong in the repo
+*.iso
+*.rvz
+*.gcm
