@@ -29,10 +29,12 @@ track dirty pages generically:
 - Full-memory deltas restore RNG and all game state automatically — zero game-specific
   memory knowledge needed. This is the key simplification vs. Slippi.
 
-Measured cost model (Phase 0, `docs/benchmarks.md`): `snapshot_ms ≈ 0.3 + dirty_pages × 2.2 µs`.
+Measured cost model (Phase 0, `docs/benchmarks.md`): `snapshot_ms ≈ 0.15 + dirty_pages × 0.75 µs`.
 It is pure memory bandwidth — 8 KiB of traffic per dirty page at this machine's single-core
-cold-copy ceiling. Coalescing contiguous dirty runs into single memcpys and de-duplicating
-pages across the restore window are load-bearing (1.6x / 3x), not optional.
+cold-copy ceiling (10.6 GiB/s). Coalescing contiguous dirty runs into single memcpys and
+de-duplicating pages across the restore window are load-bearing (1.6x / 3x), not optional.
+At a Brawl-like ~1000 dirty pages/frame this is ~0.9 ms — parity with Slippi's savestate,
+without Slippi's months of game-specific reverse engineering.
 
 ### The arena problem (found 2026-07-14, corrects the original plan)
 

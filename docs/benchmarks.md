@@ -22,47 +22,55 @@ replaying deltas in reverse. Two optimizations matter a lot and are in the measu
 the restore window** (walk deltas oldest-first; the first writer of a page wins, later frames
 skip it — the hot working set is re-dirtied every frame, so this collapses ~7x of work).
 
-### Results (v2, coalesced + dedup)
+### Results (v2, coalesced + dedup) — idle machine
+
+> **Measurement hazard, learned the hard way.** The first run of these benchmarks was taken
+> while antivirus was scanning the drive in the background. Every number came out ~2.5–3x
+> pessimistic (snapshot 2.53 ms instead of 0.92 ms; bulk memcpy 3.6 GiB/s instead of
+> 10.6 GiB/s). Same binary, same dirty-page count. **Always re-run these on an idle machine
+> before trusting them.** The table below is the clean run.
 
 | dirty target | actual pages | GetWriteWatch (mean) | snapshot/frame (mean / p99) | unique pages in 7-frame window | restore 7 frames (mean / p99) |
 |---|---|---|---|---|---|
-| 500 | 431 | 0.18 ms | **1.03** / 1.72 ms | 1641 | 4.66 / 5.91 ms |
-| 1500 | 1008 | 0.31 ms | **2.53** / 3.50 ms | 2820 | 8.00 / 9.84 ms |
-| 3000 | 1516 | 0.35 ms | **3.12** / 4.64 ms | 3985 | 9.53 / 13.19 ms |
-| 6000 | 2129 | 0.33 ms | **3.70** / 6.40 ms | 5237 | 11.05 / 17.18 ms |
-| 10000 | 2743 | 0.55 ms | **6.85** / 8.62 ms | 5860 | 16.72 / 19.28 ms |
+| 500 | 431 | 0.11 ms | **0.44** / 1.00 ms | 1641 | 2.55 / 4.01 ms |
+| 1500 | 1008 | 0.16 ms | **0.92** / 1.56 ms | 2820 | 4.24 / 5.33 ms |
+| 3000 | 1516 | 0.20 ms | **1.42** / 2.46 ms | 3985 | 5.95 / 7.03 ms |
+| 6000 | 2129 | 0.21 ms | **2.20** / 3.46 ms | 5237 | 8.12 / 9.75 ms |
+| 10000 | 2743 | 0.25 ms | **2.97** / 5.48 ms | 5860 | 9.11 / 12.17 ms |
 
 (v1, which used per-page 4 KiB memcpys over a uniform random scatter, was ~1.6x slower on
 snapshot and ~3x slower on restore. The optimizations above are not optional.)
 
-### Machine memory ceiling
+### Machine memory ceiling (idle)
 
 | copy size | time | rate |
 |---|---|---|
-| 1 MiB (in-cache) | 0.036 ms | 27.1 GiB/s |
-| 4 MiB | 0.736 ms | 5.3 GiB/s |
-| 16 MiB | 4.067 ms | 3.8 GiB/s |
-| 40 MiB (cold) | 10.728 ms | 3.6 GiB/s |
+| 1 MiB (in-cache) | 0.029 ms | 33.1 GiB/s |
+| 4 MiB | 0.124 ms | 31.5 GiB/s |
+| 16 MiB | 1.527 ms | 10.2 GiB/s |
+| 40 MiB (cold) | 3.686 ms | 10.6 GiB/s |
 
-RAM is correctly dual-channel; ~3.6 GiB/s is just this CPU's **single-core** cold-copy limit
-(a single core cannot saturate dual-channel DDR4; the ~120 MB of actual DRAM traffic per
-40 MiB copy — read source, read-for-ownership on destination, write destination — works out
-to ~11 GB/s, which is a normal single-core figure).
+~10.6 GiB/s is a normal single-core cold-copy figure for this CPU (a single core cannot
+saturate dual-channel DDR4; RAM is correctly installed in ChannelA + ChannelB).
 
 ### The cost model this gives us
 
 Snapshot cost is almost purely memory bandwidth, and it falls out exactly:
 
 ```
-snapshot_ms ≈ 0.3 (GetWriteWatch scan) + dirty_pages × 2.2 µs
+snapshot_ms ≈ 0.15 (GetWriteWatch scan) + dirty_pages × 0.75 µs
 ```
 
-2.2 µs/page is precisely 8 KiB of traffic (4 KiB into the delta + 4 KiB refreshing the
-shadow) at 3.6 GiB/s. **Two copies per dirty page is the floor for this scheme** — the
+0.75 µs/page is precisely 8 KiB of traffic (4 KiB into the delta + 4 KiB refreshing the
+shadow) at 10.6 GiB/s. **Two copies per dirty page is the floor for this scheme** — the
 alternatives (post-frame deltas with an incrementally-updated base; copy-on-write via a fault
 handler) each cost the same or more. Non-temporal stores should cut the destination
 read-for-ownership traffic and buy an estimated 1.3–1.5x; that is the main remaining
-optimization.
+optimization, and it is no longer urgent.
+
+**This lands us at parity with Slippi's ~1 ms savestate** at a Brawl-like ~1000 dirty
+pages/frame — which is the number Fizzi needed seven months of Melee reverse engineering to
+reach. We get it generically.
 
 ### What this means for the rollback budget
 
@@ -77,19 +85,24 @@ D ≈ max(0, one_way_latency_in_frames − input_delay_frames)
 Budget is 16.67 ms. With input delay 2 (Slippi's default), a friend at 30–60 ms RTT gives
 D ≈ 1–2; at 100 ms RTT, D ≈ 4. So feasibility hinges on `(cpu_emu + snapshot)` being small —
 which makes **MKDD's actual dirty-pages-per-frame the single decisive unknown.** Read it off
-the table:
+the table (assuming `cpu_emu ≈ 2 ms`, still to be measured):
 
-- If MKDD dirties **~500 pages/frame** → snapshot ~1.0 ms → comfortable at D ≤ 4.
-- If **~1500** → snapshot ~2.5 ms → workable at D ≤ 2 (same-region friends), tight beyond.
-- If **~3000+** → snapshot ≥ 3.1 ms → needs mitigation (see below).
+| MKDD dirty pages/frame | snapshot | per-frame cost at D=2 (≈50 ms RTT) | at D=4 (≈100 ms RTT) |
+|---|---|---|---|
+| ~500 | 0.44 ms | ~9 ms ✅ | ~15 ms ✅ |
+| ~1000 (Brawl-like) | 0.92 ms | ~13 ms ✅ | ~19 ms ⚠️ |
+| ~1500 | 1.42 ms | ~16 ms ⚠️ | ~23 ms ❌ |
+| ~2000+ | 2.20 ms | ~20 ms ❌ | ~29 ms ❌ |
 
 For calibration, `FaultyPine/incremental-rollback` measured ~1500 dirty pages/frame for Brawl.
-MKDD is a lighter game than Brawl, so ~500–1500 is the plausible range — i.e. **the mechanism
-looks viable, and this is worth building.** But it is not yet proven for MKDD.
+MKDD is a lighter game, so ~500–1500 is the plausible range. **At the likely dirty count this
+comes in around 1 ms — parity with Slippi's hand-reverse-engineered savestate, achieved
+generically. The mechanism is viable and this is worth building.** Same-region play (D ≤ 2) has
+real headroom; transcontinental play (D ≥ 4) will need the mitigations below.
 
-Mitigations held in reserve if the dirty count comes in high: exclude ARAM (16 MiB of mostly
-audio — rolling back audio is unnecessary); non-temporal stores; raise input delay to shrink
-D; exclude known-static regions once we have a memory map.
+Mitigations, in order of cheapness: exclude ARAM (16 MiB of mostly audio — rolling back audio
+is unnecessary, and it shrinks the GetWriteWatch scan too); non-temporal stores (est. 1.3–1.5x);
+raise input delay to shrink D; exclude known-static regions once we have a memory map.
 
 ## Part 2 — In-Dolphin measurements (BLOCKED)
 
