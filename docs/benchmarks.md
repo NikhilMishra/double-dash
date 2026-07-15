@@ -282,3 +282,289 @@ not a blocker. Toggles added for this hunt (`RollbackTrimSnapshot`, `RollbackSki
 
 Disk (9.3 → 64.7 GB), VS2022 C++ workload (MSVC 14.44), Windows 11 SDK 10.0.26100, CMake 4.4.0
 (glslang builds through it), gh 2.96. Fork at github.com/NikhilMishra/dolphin.
+
+## Part 4 — Snapshot capture cost: it is pure copy bandwidth, and the copy is already optimal
+
+Goal this session: drive the trimmed full-copy snapshot toward Part 3's ~2 ms open item. Result:
+the target is not reachable by changing *how* we copy — only by copying *fewer bytes*.
+
+### Where the capture time goes (per-device breakdown, live MKDD, trim on)
+
+Instrumented `State::DoState` per section and `HW::DoState` per device during live per-frame
+capture (`RollbackDriveFrames`+`RollbackLocalTest`, single-core, ~2400 frames of attract mode):
+
+| section | ms |
+|---|---|
+| video backend (host caches, EFB→RAM) | 2.6 |
+| **HW total** | **5.5** |
+| &nbsp;&nbsp;— MEM1 (24 MiB copy) | 3.7 |
+| &nbsp;&nbsp;— DSP / ARAM (16 MiB copy) | 1.8 |
+| &nbsp;&nbsp;— all 9 other HW devices combined | ~0.01 |
+| CoreTiming + PowerPC | ~0.01 |
+| **total capture** | **~8.2 ms** |
+
+The HW cost is **entirely the two big memcpys** (MEM1 + ARAM = 40 MiB). Every other device is
+noise; there is no hidden serialization or per-device overhead to remove. (An earlier reading put
+`hw` at ~11.4 ms and video at ~5.6 ms; the *same build* later measured 5.5 / 2.6. Both halves
+scale together ~2×, i.e. CPU-frequency / memory-contention state, not code. ~8 ms is the
+representative steady figure, demo races included.)
+
+### The copy is already at the bandwidth wall — method does not matter
+
+Tried non-temporal (streaming) stores to skip the destination read-for-ownership traffic (Part 0
+predicted a 1.3–1.5× win). Isolated 40 MiB cold-copy microbench (`tools/bench/copybench.cpp`,
+median of 40 iters, 8 cold destination buffers):
+
+| strategy | threads | ms | GB/s |
+|---|---|---|---|
+| memcpy | 1 | 2.71 | 15.5 |
+| memcpy | 4 | 2.63 | 15.9 |
+| stream (NT) | 1 | 2.97 | 14.1 |
+| stream (NT) | 8 | 2.85 | 14.7 |
+
+**Plain `memcpy` is already optimal here and NT stores are marginally *slower*.** MSVC's `memcpy`
+uses ERMSB (`rep movsb`), which already avoids the write-allocate read on large copies, so there
+was no RFO traffic left to remove; threading doesn't help either (one core saturates the effective
+~15 GB/s). **The streaming-store change (`Common/StreamingMemcpy.h`, a `ChunkFile.h` fast path) was
+implemented, measured, and reverted.** Part 0's NT estimate was for a hand-rolled per-page copy
+that never hit ERMSB; it does not apply to the bulk `DoArray` memcpy. (In-emulator the copy runs
+~6–9 GB/s, roughly half the isolated rate, from GPU-thread memory contention — which NT stores also
+cannot fix.)
+
+### What this means for the loop — input delay, not copy speed, is the lever
+
+Because rollback re-simulation **re-captures every re-simmed frame**, per displayed frame at
+rollback depth D (capture ≈ restore ≈ 8 ms, `cpu_emu` ≈ 4 ms):
+
+```
+per_frame ≈ (D+1)(cpu_emu + capture) + restore(D)
+```
+
+| D | per-frame (on rollback frames) | fps | verdict |
+|---|---|---|---|
+| 0 | 12 ms | ~83 | ✅ |
+| 1 | 32 ms | ~31 | ⚠️ occasional 1-frame hitch |
+| 2 | 44 ms | ~23 | ❌ |
+
+**Full-copy at 8 ms is fine at D=0, marginal at D=1, too slow at D≥2.** The `(D+1)×capture`
+multiplier is the whole problem — which is exactly why a cheap snapshot matters. Two levers keep D
+low; only one is cheap now:
+
+- **Input delay (cheap, MKDD-friendly).** D ≈ max(0, one-way-latency-frames − input-delay). MKDD is
+  a kart racer, not a fighter — 3–4 frames of input delay is imperceptible here and drives D→0 for
+  same-region play (RTT ≲ 50 ms). That alone makes the 8 ms full-copy snapshot viable *for MKDD*.
+- **Curated-region snapshots (Slippi-style, deferred).** Part 2 measured only ~280–860 pages
+  (~1–3.5 MiB) actually changing per frame; copy just the game-state regions via a static allowlist
+  (no page protection → fastmem stays on) for a ~1 ms snapshot that is robust at any depth. Needs a
+  reverse-engineered MKDD memory map; not built until the playable test proves it necessary.
+
+**Decision: proceed to the playable test with full-copy snapshots + generous input delay, and
+measure real 2-player rollback frequency/depth before spending RE effort on curated regions.** The
+copy cannot be made faster; only copying fewer bytes would help, and whether that is needed is an
+empirical question the playable test answers.
+
+### Reproduce (measurement harness, learned this session)
+
+The runnable exe is `Binary/x64/Dolphin.exe` (deployed with its Qt DLLs) — **not**
+`Build/x64/Release/Dolphin/bin/Dolphin.exe` (bare linker output, missing Qt6Core.dll). Launch with
+config forced via `-C` (a `-u` user-dir ini was not reliably applied), and **quote the game path as
+a single argument** — PowerShell 5.1 `Start-Process -ArgumentList @(...)` splits it at the first
+space, so Dolphin silently boots nothing:
+
+```
+Dolphin.exe -u <userdir> -b `
+  -C Dolphin.Core.CPUThread=False `
+  -C Dolphin.Core.RollbackDriveFrames=True -C Dolphin.Core.RollbackLocalTest=True `
+  -C Dolphin.Core.RollbackTrimSnapshot=True `
+  -e "<path with spaces>.rvz"
+# Logger.ini: [Options] Verbosity=4, WriteToFile=True ; [Logs] MI=True
+```
+
+## Part 5 — Playable test: MKDD re-simulation must render, so cheap rollback is off the table
+
+Wired the live loop to a playable session (real pad on port 1, fake remote on port 2, live frames
+paced by the existing VideoInterface throttle, throttle disabled during resim) and played it. The
+result overturns Part 4's optimistic read.
+
+### It stutters on every input — and the copy is not why
+
+Per-op breakdown during a synthetic worst case (a fake remote whose stick changes every field, so a
+rollback fires every frame; `RollbackP2Mirror=False`), depth 2:
+
+| op | per-call | note |
+|---|---|---|
+| snapshot capture | 8 ms | as measured before |
+| snapshot restore | 8–10 ms | fine |
+| **live field** | **2.8 ms** | a normal frame; GPU work pipelines elsewhere |
+| **re-simulated field** | **19–26 ms** | the *same field*, ~9× slower |
+
+A depth-2 rollback lands at **~70–280 ms**, i.e. a hard stutter on every input change. The dominant
+cost is **re-rendering the resimmed frames**, not the snapshot copy. (Present-skip — gating
+`Video_OutputXFB` on a resim flag — only recovered 26→19 ms; the swap-to-screen was a small part.)
+
+### Decisive experiment: skip the GPU during resim → catastrophic desync
+
+Added `FifoManager::SetSkipDrawForResim` (drains the FIFO in `RunGpuOnCpu` without running
+`OpcodeDecoder::RunFifo` — no draws, no EFB→RAM copies) and had the **sync self-test** re-simulate
+with it on, comparing the normally-rendered straight run's guest RAM against the GPU-less replay's:
+
+```
+sync self-test: restore + 7-field resim | restore-to-anchor OK, replay determinism *** FAIL ***
+divergence: first 0x000000c2, last 0x016cf63f, span 23357 KiB, differing 1442202 bytes (6.03%)
+```
+
+**Every cycle failed, diverging ~80 K–1.4 M bytes cascading across nearly all of MEM1** — not the
+1–61-byte cosmetic audio scratch from Part 3, but the whole simulation coming apart. **MKDD reads GPU
+output (EFB→RAM copies and/or GPU sync tokens) back into game logic, so re-simulation cannot skip the
+GPU.** This is the structural difference from Melee, where Slippi *can* skip rendering during
+rollback. The GPU-skip was reverted (kept only the RAM-safe present-skip).
+
+### Consequence: no cheap rollback for MKDD
+
+Every resimmed frame must run a full MKDD render (~16–18 ms single-core). That cost scales with
+rollback depth and nothing removes it:
+
+- **Curated-region snapshots don't rescue it** — they shrink the copy (~8→~1 ms) but not the render,
+  which is the dominant term. The Part 4 plan to shrink snapshots is necessary-but-insufficient.
+- **Dual-core doesn't help** — resim needs the GPU's RAM output synchronously, so the GPU thread must
+  be waited on each resimmed frame anyway.
+
+So the Slippi model (skip render + curated regions) does **not** port to MKDD; the render-skip half
+is blocked by MKDD's CPU↔GPU coupling.
+
+### Where this leaves the netcode: delay + rollback hybrid
+
+Rollback can't be the *constant* mechanism for MKDD, but it's still valuable as a **safety net over
+input-delay netcode**:
+
+- Input delay ~3–4 frames (≈50–67 ms, imperceptible for a kart racer) hides the *typical* latency, so
+  for same-region friends rollback depth is ~0 almost always — smooth, no resim.
+- Rollback keeps the two consoles perfectly in sync (MKDD's real weakness online is desyncs) and
+  absorbs the *occasional* late packet without padding the fixed delay for the worst case. Those
+  rollbacks are rare and shallow, so the brief hitch is acceptable.
+
+This is desync-free and low-latency for close friends, degrading gracefully with distance — a real
+improvement over MKDD's existing online, just not zero-delay rollback. **Next: add input delay to the
+harness (the `Match` has `sim_latency` = a depth knob but no input delay yet) and validate the smooth
+case, before any networking.** The alternative that preserves constant rollback — reverse-engineer
+exactly which EFB/GPU results MKDD reads and reproduce just those during resim without a full render —
+is months of uncertain work and is not recommended unless the hybrid proves inadequate.
+
+## Part 6 — Delay+rollback hybrid: the smooth case is real (0 rollbacks, locked 60 fps)
+
+Built the hybrid Part 5 recommended. The harness now has an **input-delay line** (config
+`RollbackInputDelay`, default 3): the controller read on field *f* is applied to game-field
+*f + input_delay*. The fake remote applies the same delay, so its value is *for* field
+*f + input_delay* and reaches us `sim_latency` (+ occasional `sim_jitter`) fields after it was
+produced. The effective rollback depth is therefore **D = max(0, sim_latency − input_delay)**: when
+the delay covers the latency the remote input arrives *before* its frame is simulated, so it's never
+predicted and never mispredicted → **no rollback at all**.
+
+### Smooth case, played on real MKDD (input-delay 3, latency 2 → D = 0)
+
+Real Xbox pad on port 0, mirrored to port 1 (`RollbackP2Mirror=True`), no jitter. Steady state over
+2 s windows:
+
+| window | fps | rollbacks | worst frame |
+|---|---|---|---|
+| boot warmup | 57.3 | 0 | 65 ms |
+| steady | **59.9** | **0 (0 %)** | **17.1 ms** |
+
+Per-op cost at steady state: capture 6.5 ms + live-step 10.2 ms ≈ 16.7 ms/field = a locked 60 fps.
+**Zero rollbacks, zero re-simulations, zero restores** — the 3-field input delay (≈50 ms, imperceptible
+for a kart racer) fully absorbs the 2-field latency. This is the exact opposite of the Part 5 stutter:
+the resim path simply never runs. Confirms the same-region experience is buttery.
+
+### Safety-net case (input-delay 3, latency 2, jitter 3 every 45 fields → depth-2 rollbacks)
+
+Forced an occasional late packet (`RollbackSimJitter=3`, `RollbackJitterPeriod=45`) against a
+churning synthetic remote (`RollbackP2Mirror=False`), so every late packet is a guaranteed
+misprediction and rollback fires on a fixed schedule. Effective depth for the late packet =
+sim_latency + jitter − input_delay = 2 + 3 − 3 = **2**.
+
+| metric | value | note |
+|---|---|---|
+| rollbacks | 2–3 / 120 frames (2 %) | ≈120/45, exactly on schedule |
+| depth | avg 2.0, max 2 | formula confirmed |
+| fps | 54.6–57.9 | down from a locked 60 |
+| restore | ~10 ms | once per rollback, depth-independent |
+| **resim field** | **25–37 ms each** | the MKDD full re-render (Part 5) |
+| **worst frame** | **76–140 ms** | the visible hitch |
+
+**The safety net works but is not free.** Rollback fires precisely when a packet is late, corrects the
+misprediction, and holds the two sims in sync — but because MKDD must re-render every resimmed field,
+the cost is **≈ 10 + depth × 30 ms**: depth-1 ≈ 40 ms (a mild blip), depth-2 ≈ 70 ms (a visible
+hitch), depth-3 ≈ 100 ms. A depth-2 rollback does **not** fit the 16.7 ms budget; it's a ~4-frame
+stall. This is the direct consequence of Part 5 (no render-skip for MKDD) applied to the hybrid.
+
+### Design consequence: input delay is the latency-hider; rollback is a *thin* margin (depth ≤ 1)
+
+The hybrid is excellent at D = 0 (smooth) but degrades sharply with depth, so the netcode must keep
+depth at 0 almost always and 1 rarely — never rely on rollback to absorb multi-frame latency swings:
+
+- Set input delay to cover latency **plus typical jitter**, so the common packet is D = 0 and only a
+  rare worst-of-jitter packet is D = 1. For same-region friends (jitter ≈ ±1 field) that's
+  `input_delay ≈ ceil(one-way latency) + 1`.
+- When the network worsens, **raise the input delay** (dynamic delay, à la GGPO/Slippi frame-advantage)
+  rather than letting rollback depth climb — a few extra ms of delay is imperceptible, a depth-2+
+  rollback is a felt stall.
+- Rollback's real job here is **desync-proofing** (MKDD's actual online weakness) plus absorbing the
+  *occasional* single-frame miss, not being the primary latency mechanism.
+
+The smooth half and the safety-net half are both now measured on real MKDD.
+
+## Part 7 — The re-simulation cost is a per-*restore* warmup, NOT the GPU render (Part 5 was wrong on the mechanism)
+
+Part 5 concluded the resim cost was the GPU re-render and that MKDD therefore can't do cheap rollback.
+Chasing "can we make low input delay viable without the stutter," a clean chain of A/B experiments
+(constant depth-N rollback via the churn harness, `RollbackP2Mirror=False`, `RollbackInputDelay=0`)
+overturned that attribution. All numbers are per-op averages over 240 resim samples/window on real MKDD.
+
+**Experiment 1 — Null video backend.** resim-step is identical with the real backend (~18–27 ms) and
+the Null backend (~18–27 ms). Null does zero rasterization, zero EFB→RAM readback, zero GPU sync. So
+the cost is **not** the GPU pixel render or readback.
+
+**Experiment 2 — time `OpcodeDecoder::RunFifo` during resim** (added `FifoManager::SetTimeResimFifo`,
+non-destructive timing around the single-core GPU-on-CPU RunFifo call). Of a ~20–27 ms resim-step,
+**RunFifo is 0.3–0.6 ms**; the other ~20–26 ms is PPC guest-code execution. So the cost is **not** the
+CPU-side FIFO/vertex/draw processing either.
+
+**Experiment 3 — depth-1 vs depth-2.** resim-step is logged as an average over the D re-simulated
+fields per rollback. Depth-2 averaged ~20 ms; **depth-1 (which measures only the first-post-restore
+field) is 36–51 ms.** So the first re-simulated field after a restore costs ~40 ms and every later
+field costs ~2 ms (like live). The cost is a **per-restore warmup**, flat in depth:
+
+| | first field after restore | later fields | live field |
+|---|---|---|---|
+| wall time | **~40 ms** | ~2 ms | ~2 ms |
+| of which RunFifo | 0.5 ms | 0.5 ms | — |
+
+**Corrected cost model:** rollback ≈ restore (~8 ms) + **~40 ms warmup** + (depth−1) × ~2 ms. Nearly
+flat in depth; dominated by a one-time ~40 ms hit per *restore*. This is why constant rollback (low
+input delay + churny input → a rollback every frame) drops to ~12–15 fps: every frame pays the warmup.
+
+**Experiment 4 — fastmem off.** The first-post-restore field is still 37–60 ms with `Fastmem=False`
+(vs ~3 ms live), so the warmup is **not** fastmem re-backpatching. It grows slightly with fastmem off —
+the signature of executing *more guest instructions*, since the slow path costs more per access.
+
+**Also ruled out:** JIT recompile from a cache clear — `MAIN_ROLLBACK_SKIP_JIT_CLEAR` defaults true and
+`JitInterface::DoState` genuinely skips `ClearCache` on restore (restore stays ~8 ms; the block cache is
+retained). So the warmup is not a recompile storm.
+
+**Conclusion: the first field after a restore executes ~20× the guest instructions of a live field.**
+The leading remaining hypothesis is that the game's idle-wait is **not fast-forwarded** after a restore
+the way it is in live play (idle-skip / CoreTiming state), so the first field spins the idle loop for
+real. Needs one instrumented run (idled-cycle / guest-instruction count per field, live vs first-resim)
+to pin exactly.
+
+**Why this changes the strategy (and is good news for latency):** the rollback cost is per-*restore*,
+fixed (~48 ms), and a cold-state artifact — **not** per-render and **not** the inherent GPU cost Part 5
+feared. If the first-post-restore field is made as cheap as a live field (~2 ms), a rollback drops from
+~48 ms to ~10 ms — cheap enough to absorb frequent shallow rollbacks, which makes **low / zero input
+delay viable** (the actual goal) without the months-of-GPU-reverse-engineering path. The Part 6 rule
+("input delay primary, depth ≤ 1") holds only *until* the warmup is eliminated; eliminating it is now
+the highest-leverage work for latency.
+
+**Next:** instrument to confirm the idle-skip/CoreTiming cause, eliminate the per-restore warmup, then
+re-run the churn test targeting first-resim-field ≈ 2 ms. Then Phase 2 networking with the transport
+driving input delay (a smaller delay once rollback is cheap).
