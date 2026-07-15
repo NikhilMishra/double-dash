@@ -85,11 +85,23 @@ alone but desyncs together":
 **You can try it now:** `tools/play-local.ps1` opens two windows on one PC in a shared race — focus a
 window to drive its player (host = P1, guest = P2), one controller + Alt-Tab works.
 
-## Next — real cross-machine play
+## Cross-machine handoff — done ✅
 
-The shared-start handoff currently uses a file, which only works for two windows on the *same* PC.
-The remaining work for internet play: send that handoff **over the network**, harden the connection
-(packet loss, jitter, reconnect), and connect-by-code / NAT traversal.
+The shared-start handoff used to go through a file (same-PC only). It now **streams the ~90 MB start
+state over the network** (compressed, with loss-recovery), so a second machine gets the host's exact
+state over the wire. Verified byte-identical over a socket with zero desyncs. Every part the netcode
+needs — transport, determinism, the speedups, and now the state handoff — runs over real sockets.
+
+Two launchers: `play-local.ps1` (two windows on one PC) and `play-online.ps1 -Host` / `-Join <ip>`
+(one instance per machine).
+
+## Next — connect and play with a friend
+
+What's left is **connectivity** — reaching the host across home routers (NAT):
+1. **First real games:** a mesh VPN (Tailscale) or a forwarded UDP port — works with the launcher today.
+2. **Seamless connect-by-code** (the Slippi-style goal): a small rendezvous server + UDP hole-punching
+   so you just swap a code. This is the next build.
+3. Real-network hardening (sustained loss/jitter/reconnect) once it's running between two homes.
 
 ---
 

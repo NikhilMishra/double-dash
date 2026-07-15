@@ -745,3 +745,27 @@ launcher defaults to delay 1.
 nothing over plain emulation — the snapshot, previously the dominant per-frame cost, is gone from the
 common path. The capture only reappears when the network is bad enough to force a prediction, which is
 exactly when you want it.
+
+## Part 12 — Cross-machine handoff: streaming the start state over the wire
+
+Lockstep needs both peers to begin from byte-identical state (Part 10). Locally that handoff went
+through a shared file — fine for two windows on one PC, useless for two machines. The last thing
+tying rollback netplay to a single box.
+
+**Fix: stream the ~90 MB snapshot over the same UDP socket.** `NetTransport::SendState`/`ReceiveState`:
+LZ4-compress the whole buffer (savestates are very compressible), split into ~1200-byte chunks under
+the MTU, and make it reliable with a chunk index + NACK — the guest keeps asking for whatever it's
+still missing until it has everything, then verifies an FNV of the reassembled buffer before
+restoring. Runs once after the handshake, before the match loop; the input delay covers the one-time
+"syncing…" pause. `RunNetworkMatch` uses the file when `RollbackStateSyncPath` is set (local fast
+path) and the wire otherwise.
+
+**Tested (two localhost peers, no shared file):** host sent and guest restored the 90 MB state with
+**identical RAM hash**, then ran the match at **0 desyncs, 60 fps, input delay 1**. The handoff is
+bit-exact over the socket, exactly as it was through the file.
+
+This closes the cross-machine blocker: everything the netcode needs — transport, determinism,
+conditional-capture speedup, and now the state handoff — runs over real sockets. What remains for
+"connect and play with a friend" is connectivity: reaching the host across home NATs. First real
+games use a mesh VPN (Tailscale) or a forwarded UDP port with the `play-online.ps1 -Host` /
+`-Join <ip>` launcher; seamless connect-by-code (rendezvous + hole-punching) is the next milestone.
