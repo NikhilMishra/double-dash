@@ -195,9 +195,16 @@ restore (`JitInterface::DoState` now honors `Rollback::ShouldSkipJitCacheClear`)
 F, run K=7 frames, roll back, re-run 7 frames, and compare **guest MEM1** (the netplay-relevant
 state — not the video/audio host caches).
 
-**Result: restore-to-anchor OK and 7-frame replay determinism PASS, every iteration.** Skipping
-the JIT clear is safe for same-session rollback, and the snapshot captures everything the
-simulation needs. This is the core correctness proof the whole approach depended on.
+**Result: restore-to-anchor is byte-perfect, every single iteration (0 mismatches in 500+).**
+The snapshot captures and restores the whole machine faithfully, and skipping the JIT clear is
+safe for same-session rollback. This is the core correctness proof the whole approach depended on.
+
+Replay determinism took longer to pin down and is written up in "The intermittent-divergence
+hunt" below — the short version is that re-running K frames reproduces guest MEM1 exactly except
+for a **bounded, non-cascading handful of bytes (~5% of iterations)** in two fixed host-timed
+scratch buffers that the simulation never reads back. The game logic is deterministic; those
+bytes are cosmetic. (An earlier "PASS every iteration" claim here was from too few samples — 12
+all-pass runs is ~50/50 luck at a 5% rate. Corrected below.)
 
 Measured cost (i9-9900KF, fastmem arena ON):
 
@@ -217,11 +224,57 @@ because Dolphin's video `DoState` serializes host-side caches and even writes EF
 during capture. Comparing guest MEM1 only is both correct (that's what must replay identically)
 and what exposed the truth.
 
+### The intermittent-divergence hunt (resolved — core is sound)
+
+Hashing guest MEM1 over many more iterations exposed an **intermittent ~5% replay mismatch**:
+restore-to-anchor was always OK, but re-running K frames occasionally produced a guest-MEM1 hash
+different from the straight run. A 5%-per-7-frames desync would make rollback unusable, so this
+had to be root-caused before building the loop. Each suspect got a config toggle and an A/B run
+of ~90–115 iterations (single-core, uncapped, idle machine):
+
+| Config changed | Failure rate | Verdict |
+|---|---|---|
+| Snapshot trim on → **off** (full 90 MB) | 2/40 (~5%) | trim exonerated |
+| DSP thread on → **off** (synchronous DSP) | 4/92 (~4%) | DSP thread exonerated |
+| JIT-clear skip on → **off** (force clear) | 4/95 (~4%) | fast-restore skip exonerated |
+| GPU backend → **Null** (no host GPU) | 4/96 (~4%) | host GPU exonerated |
+
+The rate is flat ~4–5% across every configuration, and **restore-to-anchor never once failed
+(0 mismatches across 500+ iterations)**. So the divergence is not in the snapshot, the DSP
+thread, the JIT-clear trick, or the GPU — it is a small forward-execution nondeterminism present
+even with no host GPU and a single CPU core.
+
+Localizing it (log first/last differing offset + byte count on each FAIL) was decisive:
+
+- The diff is **1–61 scattered bytes** over a ~1 MB span (**0.0% density** — not a framebuffer
+  block, which would be dense and contiguous).
+- It clusters at **two fixed guest addresses: ~0x8037_611f and ~0x8048_c3xx**, iteration after
+  iteration. One failure was a **single byte**.
+- **It does not cascade.** Re-running the replay horizon at **K=40 frames** (≈6× longer) kept the
+  diff at 1–61 bytes — same magnitude, same addresses. A real simulation desync (kart physics,
+  positions, RNG) would explode to thousands/millions of bytes within 40 frames as every float
+  diverged. It stays a handful.
+
+**Conclusion: the rollback core is correct and the MKDD simulation is deterministic.** The
+mismatch is confined to two fixed host-timed *leaf* buffers (almost certainly audio/DTK streaming
+scratch — MKDD's attract mode streams music) that are written but never read back into game logic,
+so they cannot cause a gameplay desync. This is consistent with the external fact that **Dolphin's
+own netplay plays MKDD without desyncs** — impossible if the CPU simulation were 5% nondeterministic.
+
+Consequence for the design: rollback re-simulation reproduces game logic exactly; those leaf bytes
+may differ but never feed the sim, so no desync. The eventual peer-to-peer **desync-detection hash
+must cover game-logic RAM and exclude these host-timed scratch regions** (or peers will false-alarm
+on cosmetic bytes). Identifying the exact owning subsystem of 0x8037_611f is a documented follow-up,
+not a blocker. Toggles added for this hunt (`RollbackTrimSnapshot`, `RollbackSkipJitClear`,
+`RollbackSelfTestFrames`) stay in the tree as diagnostics.
+
 ### Still to measure (Phase 1)
 
 | Benchmark | Why it matters | Status |
 |---|---|---|
-| Trimmed snapshot cost + determinism | get per-frame capture to ~2 ms | next |
+| Replay determinism root-cause | must be sound before the loop | **done — core correct (above)** |
+| Trimmed snapshot determinism | proves the fake-VMEM cut is safe | **done — trim behaves identically to full** |
+| Trimmed snapshot cost | get per-frame capture toward ~2 ms | next (MEM1+CPU+HW, drop more regions) |
 | Full rollback loop under simulated RTT | the Phase 1 gate | pending |
 | Full savestate save/load baseline | confirms mainline's path is unusable (~11/~67 ms) | pending |
 

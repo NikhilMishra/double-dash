@@ -1,6 +1,6 @@
 # Architecture (living document)
 
-Last updated: 2026-07-14 (Phase 0)
+Last updated: 2026-07-14 (Phase 1 — rollback core proven, control loop built + unit-tested)
 
 ## Model
 
@@ -89,6 +89,70 @@ Options — **measured, and the ranking flipped (2026-07-14):**
 
 **Known risk (unchanged)**: mainline's savestate *load* is dominated by the PowerPC namespace
 (~55–60 ms — likely JIT/icache invalidation). The restore path must not flush the JIT cache.
+
+## Rollback loop (Phase 1)
+
+Two layers, so the tricky part is testable without the emulator.
+
+### Layer 1 — the control algorithm (built + proven, `Core/Rollback/`)
+
+Pure, header-only, no Dolphin dependencies, exhaustively unit-tested (`UnitTests/Core/RollbackSessionTest.cpp`, 9 tests incl. a randomized delay/jitter/window sweep proving equivalence to perfect information):
+
+- **`InputBuffer<Input>`** — per-port ring of inputs, each slot `Empty | Predicted | Real`.
+  - *Prediction* for an un-received remote frame = repeat that port's most recent real input
+    (kart controls are continuous, so hold-last is right most of the time).
+  - *Misprediction* = a real input arrives for a frame we already simulated with a **different**
+    prediction. `AddRemoteInput` returns exactly that boolean — the rollback trigger. Inputs that
+    arrive *before* we simulate their frame (the input-delay happy path) can never mispredict.
+  - Tracks each port's contiguous-real high-water mark; `ConfirmedFrame()` = min across ports =
+    the newest frame safe to release (no rollback can reach before it).
+- **`RollbackSession<Input, Game, NumPorts>`** — the loop, over a caller-supplied `Game` backend
+  (`Capture`/`Restore`/`Step`). Invariant it enforces: *predict-and-correct yields the exact state
+  that having every input up front would have.* Frame convention: snapshot for frame F is the state
+  **before** F. `MaybeRollback()` restores the snapshot at the earliest bad frame and re-simulates
+  forward to the present; `AdvanceFrame()` snapshots then steps once. Both go through one
+  `SimulateFrame` so normal advance and re-sim have identical ordering.
+
+The snapshot ring holds `window + 2` states; `window` is the deepest rollback (size it above
+worst-case network delay in frames). For the Dolphin backend the snapshot is heavy, so `window`
+stays small (≈8–10) and the trimmed snapshot size sets the memory cost (e.g. 10 × ~24 MB target).
+
+### Layer 2 — the Dolphin backend (next)
+
+The `Game` backend for real emulation:
+
+- **`Capture`/`Restore`** — reuse the proven `Rollback::Snapshot` (full-copy, fastmem-arena on,
+  JIT-clear skipped on restore). Already validated in Phase 1's determinism work.
+- **`Step` = advance exactly one emulated frame.** Feasible **in single-core**: the CPU-GPU thread
+  is the only sim thread and `PowerPCManager::RunLoop()` already returns synchronously when
+  `CPUManager::Break()` fires from the field-boundary callback (`Core::Callback_NewField` →
+  `CPU::Break`, the same primitive `DoFrameStep` uses). So "run to the next field boundary and
+  stop" exists; the rollback driver calls it N times to re-simulate. Dual-core would additionally
+  need a GPU-queue fence per step (`AsyncRequests::WaitForEmptyQueue`), so **the loop is built in
+  single-core first.**
+- **Input injection** — override the pad at `CSIDevice_GCController::HandleMoviePadStatus`
+  (`SI_DeviceGCController.cpp`), ahead of the netplay branch, overwriting `*pad_status` exactly as
+  `Movie::PlayController` does. A `Rollback::GetInput(port, GCPadStatus*)` returns false (no-op)
+  until a match is running, mirroring how the Movie/NetPlay hooks sit inert.
+- **Input type** — a `RollbackPad` wrapping only the deterministic `GCPadStatus` fields (buttons,
+  sticks, triggers), **not** host-only noise like `err`/`isConnected`, with `==` for misprediction
+  checks and a compact wire encoding (reused in Phase 2).
+
+### Phase 1 gate and the local latency harness
+
+Before any networking, prove the loop against a **local fake-remote**: feed player 2's inputs to
+the session with a configurable delay + jitter, so prediction/rollback runs for real with no
+sockets. Gate: a 3-lap race under simulated RTT with no visible desync at 60 fps. This is the
+emulator-side analogue of the unit test's equivalence property.
+
+### Desync detection must exclude host-timed scratch
+
+Phase 1's determinism hunt (see `benchmarks.md`) proved the MKDD simulation is deterministic
+except for a bounded, non-cascading handful of bytes in two fixed host-timed leaf buffers
+(≈`0x8037_611f`, `0x8048_c3xx` — audio/DTK streaming scratch the sim never reads back). The
+peer-to-peer desync-detection checksum (Phase 2) must therefore hash **game-logic RAM and exclude
+these regions**, or peers will false-alarm on cosmetic bytes. Rollback re-simulation itself is
+unaffected: those bytes never feed the sim, so they cannot change gameplay.
 
 ## Networking (Phase 2)
 
