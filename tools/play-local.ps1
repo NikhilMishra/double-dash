@@ -23,7 +23,7 @@
 
 param(
   [string]$Game = "$PSScriptRoot\..\Mario Kart - Double Dash!! (USA).rvz",
-  [int]$InputDelay = 3,
+  [int]$InputDelay = 2,   # localhost latency is ~0, so 2 frames feels tight; raise it if you see jitter
   [int]$Port = 7777
 )
 
@@ -55,6 +55,44 @@ foreach ($d in @($hostDir, $guestDir)) {
   $cfg = Join-Path $d "Config"
   New-Item -ItemType Directory -Force -Path $cfg | Out-Null
   Set-Content -Path (Join-Path $cfg "Logger.ini") -Value $loggerIni -Encoding ASCII
+}
+
+# Controller mapping. The two windows drive different SI ports (host = port 0/GCPad1, guest = port
+# 1/GCPad2), so map your pad to BOTH ports in BOTH dirs -- then whichever window you focus, its port
+# reads the pad (the other window is unfocused, so it reads neutral; that's the focus-switch model).
+# Defaults to an Xbox pad over XInput; if your pad shows up under a different backend, remap it once
+# in each window's Controllers > Configure and it'll stick (this only rewrites on the next launch).
+$ControllerDevice = "XInput/0/Gamepad"
+$padBody = @"
+Buttons/A = ``Button A``
+Buttons/B = ``Button B``
+Buttons/X = ``Button X``
+Buttons/Y = ``Button Y``
+Buttons/Z = ``Shoulder R``
+Buttons/Start = ``Start``
+Main Stick/Up = ``Left Y+``
+Main Stick/Down = ``Left Y-``
+Main Stick/Left = ``Left X-``
+Main Stick/Right = ``Left X+``
+Main Stick/Calibration = 100.00 141.42 100.00 141.42 100.00 141.42 100.00 141.42
+C-Stick/Up = ``Right Y+``
+C-Stick/Down = ``Right Y-``
+C-Stick/Left = ``Right X-``
+C-Stick/Right = ``Right X+``
+C-Stick/Calibration = 100.00 141.42 100.00 141.42 100.00 141.42 100.00 141.42
+Triggers/L = ``Trigger L``
+Triggers/R = ``Trigger R``
+Triggers/L-Analog = ``Trigger L``
+Triggers/R-Analog = ``Trigger R``
+D-Pad/Up = ``Pad N``
+D-Pad/Down = ``Pad S``
+D-Pad/Left = ``Pad W``
+D-Pad/Right = ``Pad E``
+"@
+$section = "Device = $ControllerDevice`n$padBody"   # padBody has no trailing newline (here-string)
+$gcPadIni = "[GCPad1]`n$section`n[GCPad2]`n$section`n"
+foreach ($d in @($hostDir, $guestDir)) {
+  Set-Content -Path (Join-Path $d "Config\GCPadNew.ini") -Value $gcPadIni -Encoding ASCII
 }
 
 # Shared start-state file (host -> guest). Clear any stale copy so the guest waits for a fresh one.
