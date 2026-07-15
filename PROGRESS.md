@@ -54,16 +54,29 @@ the next frame is shown. Both halves are now proven headless on the live game:
 **So the rollback mechanism is correct.** What's left before it's playable is (a) performance tuning
 and (b) connecting it to real controller input.
 
-## Next — toward a playable build
+## The full loop is wired and runs — but it's snapshot-bound ⚠️
 
-1. **Performance.** A full snapshot every frame currently costs ~8–10 ms and a rewind ~20 ms; a
-   worst-case 7-frame rewind of a busy scene is ~130 ms today. Steady-state play looks like it fits
-   60 fps, but deep/frequent rewinds would hitch. Two levers: shrink the snapshot (~57 MB → target
-   ~24 MB) and skip rendering during the invisible replay frames.
-2. **Wire real input + a local latency test** — you play, a fake "remote" player's inputs arrive
-   with simulated lag, and rollback runs for real. **This is the first build you test by playing**,
-   and the Phase 1 finish line (3-lap race, no desync, 60 fps).
-3. Then Phase 2: real networking.
+The complete rollback loop now runs the live game end-to-end: it polls your controller, predicts a
+(local, simulated-lag) second player, snapshots every frame, and rolls back for real on
+mispredictions. Headless it **boots, runs, and is correct** — rollbacks stay bounded to the
+simulated latency, no desync.
+
+**But it's not smooth yet.** Taking a full snapshot every frame costs ~19 ms, which caps it at
+~41 fps and turns each rollback into a ~250 ms hitch. Everything traces to one thing: the snapshot
+is ~57 MB and copied through Dolphin's general-purpose save machinery 60×/second.
+
+## Next — make the snapshot fast (the gate to 60 fps)
+
+The snapshot must drop from ~19 ms to under ~10 ms. Levers, in order of payoff:
+1. **Trim it to just the simulation state** (~57 MB → ~24 MB) — skip the audio (ARAM, 16 MB) and
+   video host-cache serialization. These broke the *exact-match* determinism check before, but only
+   in a few cosmetic bytes; the work is to confirm gameplay stays identical with them out, then keep
+   them out.
+2. **Skip rendering during the invisible replay frames.**
+3. Faster copy (non-temporal stores).
+
+Once snapshots are fast: play a 3-lap race under simulated lag at 60 fps (**Phase 1 finish line**),
+then Phase 2 networking.
 
 ---
 
