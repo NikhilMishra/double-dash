@@ -6,3 +6,6 @@
 *.iso
 *.rvz
 *.gcm
+
+# Built distributable package (rebuild with tools/package.ps1)
+/dist/
