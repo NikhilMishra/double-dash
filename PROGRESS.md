@@ -4,8 +4,9 @@
 Dolphin fork with rollback netcode (predict the other player's inputs, and silently re-simulate
 when a guess was wrong).
 
-**Status: Phase 1 (the rollback engine). The hard correctness questions are answered and the
-control logic is proven; wiring it into the live emulator is underway.**
+**Status: Phase 2 (networking). Two computers can now run the same race in perfect lockstep over a
+network connection — the core of online play is working. What's left is making it work between
+*different* machines (not just two windows on one PC) and hardening the connection.**
 
 ---
 
@@ -14,8 +15,8 @@ control logic is proven; wiring it into the live emulator is underway.**
 | Phase | What it is | Status |
 |------|------------|--------|
 | **0. Feasibility** | Prove snapshotting the game 60×/sec is fast enough | ✅ **Done** |
-| **1. Rollback engine** | Snapshot + predict + re-simulate, single machine | 🔨 **In progress** |
-| **2. Networking** | Real internet play, connect-by-code, NAT traversal | ⬜ Not started |
+| **1. Rollback engine** | Snapshot + predict + re-simulate, single machine | ✅ **Done** |
+| **2. Networking** | Real internet play, connect-by-code, NAT traversal | 🔨 **In progress** |
 | **3. Polish** | Packaging, setup UX, controller config | ⬜ Not started |
 
 ---
@@ -54,29 +55,41 @@ the next frame is shown. Both halves are now proven headless on the live game:
 **So the rollback mechanism is correct.** What's left before it's playable is (a) performance tuning
 and (b) connecting it to real controller input.
 
-## The full loop is wired and runs — but it's snapshot-bound ⚠️
+## The rollback loop is smooth — a stutter bug was found and fixed ✅
 
-The complete rollback loop now runs the live game end-to-end: it polls your controller, predicts a
-(local, simulated-lag) second player, snapshots every frame, and rolls back for real on
-mispredictions. Headless it **boots, runs, and is correct** — rollbacks stay bounded to the
-simulated latency, no desync.
+The full loop runs the live game end-to-end: it polls your controller, feeds in the other player,
+snapshots every frame, and silently rewinds + replays on a wrong guess. It was hitching badly at
+first (~250 ms per rewind). The cause turned out **not** to be the snapshot copy but a hidden one:
+every rewind was throwing away the emulator's compiled-code cache, forcing it to recompile the whole
+game for one frame. Teaching the rewind to keep that cache dropped a rewind from **~48 ms to ~10 ms**
+and unlocked a smooth 60 fps — and the low input-delay we actually want. (Details: `benchmarks.md`
+Parts 7–9.)
 
-**But it's not smooth yet.** Taking a full snapshot every frame costs ~19 ms, which caps it at
-~41 fps and turns each rollback into a ~250 ms hitch. Everything traces to one thing: the snapshot
-is ~57 MB and copied through Dolphin's general-purpose save machinery 60×/second.
+## Phase 2 — two peers in perfect lockstep 🔨
 
-## Next — make the snapshot fast (the gate to 60 fps)
+**The milestone that makes it "online":** two separate copies of the emulator now run the *same* race
+in exact byte-for-byte lockstep, exchanging controller inputs over a network connection. Verified
+their game memory is **identical at frame 1 and still identical 900 frames later — zero desyncs over
+1000+ frames**, at a locked ~60 fps.
 
-The snapshot must drop from ~19 ms to under ~10 ms. Levers, in order of payoff:
-1. **Trim it to just the simulation state** (~57 MB → ~24 MB) — skip the audio (ARAM, 16 MB) and
-   video host-cache serialization. These broke the *exact-match* determinism check before, but only
-   in a few cosmetic bytes; the work is to confirm gameplay stays identical with them out, then keep
-   them out.
-2. **Skip rendering during the invisible replay frames.**
-3. Faster copy (non-temporal stores).
+Getting two independently-started copies to agree took three fixes, each a known cause of "it works
+alone but desyncs together":
 
-Once snapshots are fast: play a 3-lap race under simulated lag at 60 fps (**Phase 1 finish line**),
-then Phase 2 networking.
+1. **Same starting point.** The two copies boot to slightly different moments, so one hands its exact
+   machine state to the other at match start — now they begin identical.
+2. **Deterministic mode.** The emulator has a strict mode (used by its own netplay) that makes audio,
+   graphics, and timing reproducible frame-for-frame; it's now switched on for rollback play.
+3. **Matching hardware setup.** The two copies had different memory cards plugged in, which alone was
+   enough to snowball into a desync — both now run card-less (matching memory cards is a later nicety).
+
+**You can try it now:** `tools/play-local.ps1` opens two windows on one PC in a shared race — focus a
+window to drive its player (host = P1, guest = P2), one controller + Alt-Tab works.
+
+## Next — real cross-machine play
+
+The shared-start handoff currently uses a file, which only works for two windows on the *same* PC.
+The remaining work for internet play: send that handoff **over the network**, harden the connection
+(packet loss, jitter, reconnect), and connect-by-code / NAT traversal.
 
 ---
 
