@@ -23,7 +23,8 @@
 
 param(
   [string]$Game = "$PSScriptRoot\..\Mario Kart - Double Dash!! (USA).rvz",
-  [int]$InputDelay = 2,   # localhost latency is ~0, so 2 frames feels tight; raise it if you see jitter
+  [int]$InputDelay = 1,   # localhost sweet spot: ~16 ms felt lag, 0 snapshots, 0 rollbacks. Raise to
+                          # 2 for more margin; 0 removes the last frame of lag but snapshots every frame
   [int]$Port = 7777
 )
 

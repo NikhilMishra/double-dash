@@ -701,3 +701,47 @@ match: focus a window to drive its player (host = P1, guest = P2), one controlle
 critical flag set (single-core, determinism-via-role, EXI empty, host→guest state handoff over a shared
 file). Same-machine only for now; real cross-machine play needs the state handoff over the wire (M3),
 since the file channel assumes a shared filesystem.
+
+## Part 11 — Conditional capture: the smooth case now runs at raw emulator speed
+
+Once two peers were in lockstep, the first play test felt heavy: two instances on one PC, each frame
+~10 ms emulate+render **plus a ~6 ms whole-machine snapshot, taken every frame** — right at the 60 fps
+limit, so anything extra tipped it under. But the snapshot only exists to roll back, and on a good
+connection (always on localhost) nothing ever rolls back. We were paying ~40% of the frame budget for
+a safety net that never deployed.
+
+**The fix: snapshot a frame only if a port's input for it is still a prediction.** A frame simulated
+entirely from real inputs can never be mispredicted, so it can never be a rollback target, so its
+pre-state is never needed. When the input delay covers the network latency, every remote input has
+arrived before its frame is simulated → no prediction → no capture → no rollback. Just deterministic
+lockstep at full speed. The rollback machinery stays intact and only "turns on" when an input is
+genuinely late. (This is MKDD's version of Slippi's "cheap when confirmed" — Slippi skips the *GPU*
+during rollback because Melee never reads it back; MKDD can't do that, but it doesn't need to, because
+the rollback itself is cheap after the Part 8 fix. The remaining waste was the per-frame *capture*,
+which this removes.)
+
+Correctness: the rollback target is a mispredicted frame, which was predicted, hence captured. The
+only edge is the out-of-window clamp, which can land on a confirmed (uncaptured) frame — it now skips
+forward to the earliest frame that actually holds a snapshot. `RollbackSessionTest` still passes
+13/13 including `RandomizedEquivalence` (predict+rollback ≡ perfect-information across a delay/jitter/
+window sweep).
+
+**Measured (two localhost peers, MKDD, real match):**
+
+| input delay | felt latency | captures / 120 frames | rollbacks | worst frame | fps |
+|---|---|---|---|---|---|
+| 2 | ~33 ms | **0** | 0 | ~18 ms | 59.9 |
+| 1 | ~16 ms | **0** | 0 | ~19–25 ms | 59.9 |
+| 0 | ~0 ms | 120 | 0* | ~20–40 ms | 59.9 |
+
+Worst frame dropped from ~38 ms (Part 10, capture every frame) to **~18 ms**. At delay 1 the capture
+count is a hard **0** — the remote input is always in hand before its frame runs, so the match cannot
+roll back regardless of what's pressed; ~16 ms of felt lag for free. Delay 0 removes the last frame of
+lag but predicts (and snapshots) every frame; *0 rollbacks only because attract-mode input doesn't
+change* — under active steering it would roll back, so it trades smoothness for latency. The local
+launcher defaults to delay 1.
+
+**Net effect:** on a connection where the delay covers the latency, rollback netplay costs essentially
+nothing over plain emulation — the snapshot, previously the dominant per-frame cost, is gone from the
+common path. The capture only reappears when the network is bad enough to force a prediction, which is
+exactly when you want it.
