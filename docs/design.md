@@ -124,12 +124,30 @@ The `Game` backend for real emulation:
 - **`Capture`/`Restore`** — reuse the proven `Rollback::Snapshot` (full-copy, fastmem-arena on,
   JIT-clear skipped on restore). Already validated in Phase 1's determinism work.
 - **`Step` = advance exactly one emulated frame.** Feasible **in single-core**: the CPU-GPU thread
-  is the only sim thread and `PowerPCManager::RunLoop()` already returns synchronously when
+  is the only sim thread and `PowerPCManager::RunLoop()` returns synchronously when
   `CPUManager::Break()` fires from the field-boundary callback (`Core::Callback_NewField` →
   `CPU::Break`, the same primitive `DoFrameStep` uses). So "run to the next field boundary and
   stop" exists; the rollback driver calls it N times to re-simulate. Dual-core would additionally
   need a GPU-queue fence per step (`AsyncRequests::WaitForEmptyQueue`), so **the loop is built in
   single-core first.**
+
+  Concrete structure (worked out from the run loop, not yet coded): the driver must live at
+  `CPUManager::Run`'s level, **not** inside `OnFrameEnd`, or re-simulating would re-enter
+  `RunLoop`. Plan: branch `CPUManager::Run`'s `State::Running` case — when a match is active, run a
+  rollback loop instead of the bare `power_pc.RunLoop()`. Each iteration: capture the pre-frame
+  snapshot, arm a one-shot field-boundary break (a rollback flag alongside `s_frame_step` in
+  `Callback_NewField`), call `power_pc.RunLoop()` (returns after one field), then run the post-frame
+  logic (advance the session; on a late remote input, restore + call the one-frame primitive N times
+  to catch up invisibly). Because `Break()` leaves CPU state in `Stepping`, the loop resets it to
+  `Running` before the next frame. Validate headless first: a self-test that does a *synchronous*
+  restore+resim through this primitive and checks the guest-RAM hash matches the straight run
+  (the emulator-side analogue of the passing `RollbackSession` unit test).
+
+- **`RollbackManager` + injection seam (landed, inert).** `Core/Rollback/RollbackManager` exposes
+  `IsMatchActive()` and `GetInput(system, port, GCPadStatus*)`, wired into
+  `CSIDevice_GCController::GetPadStatus` ahead of the local-poll/movie/netplay path. It returns
+  false until a match runs, so it is a verified no-op on stock emulation. The run loop above fills
+  in the match-active path.
 - **Input injection** — override the pad at `CSIDevice_GCController::HandleMoviePadStatus`
   (`SI_DeviceGCController.cpp`), ahead of the netplay branch, overwriting `*pad_status` exactly as
   `Movie::PlayController` does. A `Rollback::GetInput(port, GCPadStatus*)` returns false (no-op)
