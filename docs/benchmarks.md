@@ -565,6 +565,48 @@ delay viable** (the actual goal) without the months-of-GPU-reverse-engineering p
 ("input delay primary, depth ≤ 1") holds only *until* the warmup is eliminated; eliminating it is now
 the highest-leverage work for latency.
 
-**Next:** instrument to confirm the idle-skip/CoreTiming cause, eliminate the per-restore warmup, then
-re-run the churn test targeting first-resim-field ≈ 2 ms. Then Phase 2 networking with the transport
-driving input delay (a smaller delay once rollback is cheap).
+## Part 8 — The per-restore warmup, found and fixed: BAT-remap was clearing the JIT
+
+Instrumented the hunt and landed the fix. The warmup was **not** idle-skip and **not** the arena write:
+
+**Idle-skip ruled out.** Logged CoreTiming `GetTicks`/`GetIdleTicks` per field (executed = ΔTicks −
+ΔIdle). Live and first-resim fields have *identical* executed (~311 K cyc) and idled (~7.67 M cyc)
+counts — same instructions, same idle-skip — yet the first-resim field takes ~40 ms vs ~2.5 ms. So the
+*same* code runs ~20× slower for one field; it's a host-side effect, not more work.
+
+**Arena write ruled out.** Added `RollbackDirtyArenaMB`, which writes N MiB of the guest arena back to
+itself (values unchanged) before each *live* field. Writing the full 24 MiB MEM1 left live-step at
+~2.5 ms — the arena write does not cause the warmup. (Also: the snapshot *capture* copies ~112 MiB
+before every live field and those stay fast, so it isn't cache/bandwidth thrash.) By elimination the
+cause is a restore-read-mode *subsystem* side effect, not the memory contents.
+
+**Root cause.** `PowerPCManager::DoState` on load (PowerPC.cpp:111–126) calls `MMU::IBATUpdated()` and
+`MMU::DBATUpdated()`, and each ends in `JitInterface::ClearSafe()` → `GetBlockCache()->Clear()`. So
+**every rollback restore cleared the JIT block cache** — despite the careful skip in
+`JitInterface::DoState` — and the first re-simulated field had to **recompile every hot block**. The
+clear is cheap (restore stayed ~8 ms); the deferred recompile is the ~40 ms. This fits every
+observation: same instructions (recompiled then run), fastmem-independent, Null-identical, RunFifo ≈ 0,
+per-restore/first-field-only, flat in depth.
+
+**Fix (one guard).** `JitInterface::ClearSafe()` now honors `Rollback::ShouldSkipJitCacheClear()` — the
+same flag `DoState` already uses. During a rollback the guest returns to an earlier point in the *same*
+session, so the restored BAT/PAT config is one whose compiled blocks are still valid; keeping them is
+safe. Outside rollback (a real BAT change) the clear still runs.
+
+**Result (real MKDD, churn harness, throttle disabled during resim):**
+
+| metric | before | after |
+|---|---|---|
+| first-post-restore field | ~40 ms | **~4.5 ms** |
+| restore | ~8 ms | ~5.5 ms (no Clear) |
+| depth-2 jitter rollback hitch | 76–140 ms | **~52 ms** |
+| worst-case 100 %-rollback fps | ~13 | **~29** |
+
+**Determinism preserved:** the sync self-test (restore + 12-field replay, guest-RAM compare) is PASS
+every cycle, restore-to-anchor OK, zero divergence — the skip is safe.
+
+**Corrected cost model:** rollback ≈ restore (~6 ms) + ~4.5 ms first field + (depth−1) × ~2 ms. A
+depth-1 rollback is now **~10 ms** (was ~48 ms). Low input delay is now viable; the next bottleneck for
+*constant* rollback is the snapshot **capture** (~8 ms, ×2 on a rollback frame) — the Part 4
+curated-region snapshot would cut it to ~1 ms and is the next lever. **Then Phase 2 networking**, with
+the transport free to run a small input delay because rollback is finally cheap.
