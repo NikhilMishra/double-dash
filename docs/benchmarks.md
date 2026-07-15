@@ -647,3 +647,57 @@ kicked off on a worker thread at the field boundary would be a consistent point-
 inside the idle window, *hiding* the ~6 ms capture in the smooth case rather than reducing it. Complex
 (threading/sync) and single-core-specific; noted for later. **Verdict: capture is good enough post-fix;
 proceed to Phase 2 networking.**
+
+## Part 10 — Phase 2 networking: two peers in byte-identical lockstep
+
+Goal: two separate Dolphin processes, connected by a direct code (no matchmaking service), running the
+*same* MKDD match. Built in milestones — M1 transport, M2 shared loop — then spent the real effort on
+**cross-process determinism**, which is where every subtle bug lived.
+
+**M1 — transport (`RollbackNet.h/.cpp`).** Raw non-blocking UDP, polled from the CPU thread at field
+boundaries (no worker thread, nothing to lock against the rollback loop). Guest drives a HELLO/HELLO_ACK
+handshake; host learns the guest's address from `recvfrom` and assigns host = SI port 0, guest = SI
+port 1. Every INPUT packet carries a redundant window of the last 16 inputs, so a dropped datagram is
+covered by the next without retransmission (the GGPO trick). Localhost RTT ~16 ms.
+
+**M2 — shared match loop.** Each field: read the local pad, apply it delayed by `input_delay`, send the
+raw pad keyed to the frame it will apply to; feed the peer's inputs into the `RollbackSession`; a
+frame-advantage stall keeps neither peer past what the rollback window can cover. Desync detection
+exchanges a guest-RAM hash every 60 frames and logs `*** DESYNC ***` on mismatch.
+
+**The two instances desynced at frame 0 — and fixing it took three independent determinism fixes.**
+
+1. **Initial state didn't match.** Two independently booted instances begin driving at different points
+   in their own boot/attract sequence, so "session frame 0" is a different machine on each. Fix: the
+   host captures its whole machine and the guest adopts it (`Snapshot::Bytes`/`RestoreBytes`), so both
+   start byte-identical. **Non-obvious trap:** the per-frame snapshot *trim* (Part 9, drops fake-VMEM +
+   video caches) is validated by an *in-process* self-test — which cannot detect a bad trim, because
+   within one process a dropped region simply keeps its identical value across the restore. Across two
+   processes those regions differ. The cross-process handoff must transfer the **full untrimmed** state
+   (`CaptureFull`): 90 MB, not the trimmed 48 MB. Confirmed the handoff is exact — post-restore RAM
+   hash matched the host's to the bit.
+
+2. **One field step still diverged from identical state + identical input.** Root cause: Dolphin's
+   global determinism mode (`Core::WantsDeterminism` — deterministic DSP/GPU/SI timing, no idle-skip,
+   matching JIT codegen) is only enabled for movies and Dolphin's own NetPlay. Enabled it whenever
+   `RollbackNetRole != 0`. That alone hangs boot: `EXI_DeviceIPL`'s `GetGCTime` `ASSERT`s that
+   determinism implies a Movie/NetPlay clock, and the failed assert pops a blocking panic dialog in a
+   batch process. Fix: give the rollback path its own deterministic clock (shared `CustomRTCValue` +
+   emulated ticks), mirroring the Movie/NetPlay branches.
+
+3. **Down to 9 differing bytes — which cascaded.** With determinism on and inputs proven identical
+   (dumped both pads: equal), one step still left 9 bytes different: the EXI OS global at `0x800030C0`
+   plus a few RNG-like bytes in game RAM. Tiny, but **not** cosmetic — it grew to **1.7 MB by frame
+   900**. Root cause: the two instances use different user dirs, so different **memory cards** sat in
+   the EXI slots; the OS wrote different EXI globals and it snowballed. Fix: both peers run with EXI
+   slots empty (`SlotA/B = None`), exactly as NetPlay forces a matched card. (Memory-card *sync*, so
+   saves work, is future work.)
+
+**Result.** Two localhost peers, MEM1 **byte-identical at frame 1 and frame 900** (full 24 MiB),
+**0 desyncs over 1000+ frames**, locked ~60 fps, 0 rollbacks, RTT ~16 ms. This is a genuine shared
+match: focus a window to drive its player (host = P1, guest = P2), one controller + Alt-Tab works.
+
+**Reproduce.** `tools/play-local.ps1` launches both windows on one machine with every determinism-
+critical flag set (single-core, determinism-via-role, EXI empty, host→guest state handoff over a shared
+file). Same-machine only for now; real cross-machine play needs the state handoff over the wire (M3),
+since the file channel assumes a shared filesystem.
