@@ -607,6 +607,43 @@ every cycle, restore-to-anchor OK, zero divergence — the skip is safe.
 
 **Corrected cost model:** rollback ≈ restore (~6 ms) + ~4.5 ms first field + (depth−1) × ~2 ms. A
 depth-1 rollback is now **~10 ms** (was ~48 ms). Low input delay is now viable; the next bottleneck for
-*constant* rollback is the snapshot **capture** (~8 ms, ×2 on a rollback frame) — the Part 4
-curated-region snapshot would cut it to ~1 ms and is the next lever. **Then Phase 2 networking**, with
-the transport free to run a small input delay because rollback is finally cheap.
+*constant* rollback is the snapshot **capture** (~8 ms, ×2 on a rollback frame) — see Part 9.
+
+## Part 9 — Capture cost: curation doesn't work for MKDD; a safe trim gets 8 → 6 ms
+
+Went after the ~8 ms capture (video 2.6 + hw 5.5). Two results.
+
+**Curated-region snapshots are dead for MKDD.** Added cumulative dirty-page *union* tracking to
+`DirtyPageTracker` (per-page seen-bitset). The idea was a Slippi-style static allowlist: copy only the
+regions that ever change. But over an attract-mode session the **union reaches 100 % of the 16 448-page
+(64 MiB) arena within the first 600 frames** — even though the *mean* is only ~280 dirty pages/frame
+(~1.1 MiB). Occasional full-memory writes (scene loads / heap resets — the `max 16448` frames) force any
+static allowlist to include everything, so it degenerates to the full copy. Per-frame *incremental*
+snapshots would be cheap (~0.2 ms) but need the write-watch tracker live, which forces fastmem off (the
+Phase 0 ~7× penalty, already rejected). So there is no cheap curated capture on Windows with fastmem on.
+
+**Safe trim landed (8 → 6 ms).** `MemoryManager::DoState` copied `GetRamSize()` = `NextPowerOf2(24 MiB)`
+= **32 MiB**, i.e. 8 MiB of dead power-of-two padding above real MEM1 (the game only addresses the low
+`GetRamSizeReal()` bytes). Under `Rollback::IsTrimmingSnapshot()` it now copies only 24 MiB. Capture and
+restore both trim so the buffer stays consistent; full savestates are unchanged. Measured: hw
+**5.5 → 3.7 ms**, total capture **8 → ~6 ms**, sync self-test determinism **PASS**.
+
+| capture component | before | after |
+|---|---|---|
+| video_backend | 2.4 ms | 2.4 ms |
+| hw (MEM1 + ARAM) | 5.5 ms | **3.7 ms** |
+| **total** | **~8 ms** | **~6 ms** |
+
+**What's left, and why it's deferred.** The remaining capture is `video_backend` (~2.4 ms — texture
+cache + framebuffer, which resim *regenerates*, so possibly trimmable but risky for EFB-readback/visual
+correctness) and ARAM (~1.8 ms — audio DMA/mailbox feeds game logic, unsafe to trim wholesale). Neither
+is a clean win. Crucially, **after the Part 8 warmup fix, capture is no longer the binding constraint**
+for realistic play: the smooth case (D=0) is a locked 60 fps, and only the pathological constant-rollback
+case (low delay + churny input, a rollback every frame) is capture-bound — and curation can't fix that.
+
+**Promising future lever (not built): background the capture during the throttle sleep.** In single-core,
+the CPU thread is idle during `VideoInterface::Throttle`, so guest memory is static — a snapshot copy
+kicked off on a worker thread at the field boundary would be a consistent point-in-time copy and finish
+inside the idle window, *hiding* the ~6 ms capture in the smooth case rather than reducing it. Complex
+(threading/sync) and single-core-specific; noted for later. **Verdict: capture is good enough post-fix;
+proceed to Phase 2 networking.**
