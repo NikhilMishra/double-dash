@@ -151,12 +151,47 @@ Dolphin.exe -b -e "<mkdd>.rvz" -u <userdir>
 # read userdir/Logs/dolphin.log
 ```
 
-### Still to measure
+### Live 2-player race (human-played, ~90 s)
+
+Reconstructed per-window rate (the logged cumulative mean understates the in-race figure):
+
+| phase | dirty pages/frame | snapshot @ mean |
+|---|---|---|
+| menus / title | ~230 | ~0.2 ms |
+| attract demo | ~305–360 | ~0.25 ms |
+| **live race (heaviest window)** | **~640–860** | **~0.6 ms** |
+
+**In-race snapshot cost ≈ 0.6 ms** — around Slippi-parity, well under the 16.67 ms budget. The
+snapshot-size question is settled and favorable.
+
+### DECISIVE: the fastmem-arena cost sinks the dirty-tracking approach
+
+The live race exposed a large framerate drop, so speed was measured directly (uncapped, same
+attract scene, `tools/bench/` heartbeat that logs emulated fps in either config):
+
+| config | median | floor (heavy scenes) | vs stock |
+|---|---|---|---|
+| untracked (fastmem arena ON, stock) | **241 fps (~400%)** | never below ~95 fps | 100% |
+| tracked (fastmem arena OFF) | **32 fps (~53%)** | ~31 fps | ~1/7 |
+
+**Disabling the fastmem arena — which `MEM_WRITE_WATCH` requires — costs ~7× emulation speed and
+drops MKDD below realtime.** The dirty-tracking approach therefore trades a ~0.6 ms snapshot
+saving for a penalty that breaks realtime *before* rollback resim is even added. It is not
+viable as built. **Phase 1 pivots to full-memory-copy snapshots, which keep the fastmem arena on
+(see `docs/design.md`).** The `DirtyPageTracker` / tracked arena stay in the tree as a
+measurement tool and a possible future Linux path (soft-dirty tracks aliased memory without
+disabling fastmem).
+
+Full-copy sanity check: MEM1 real size is 24 MiB → ~2.2 ms/frame at 10.6 GiB/s. With ~400% stock
+speed headroom (~4 ms to emulate a frame), 4 + 2.2 = ~6.2 ms/frame — comfortably under 16.67 ms,
+and rollback resim runs at full fastmem speed.
+
+### Still to measure (Phase 1)
 
 | Benchmark | Why it matters | Status |
 |---|---|---|
-| Dirty pages in a live 2P race | the definitive figure (attract mode ≈ 280 is a proxy) | needs gameplay input |
-| MKDD CPU-only frame cost (no render) | the other half of `(cpu_emu + snapshot)` per resim frame | pending |
+| Full MEM1-copy snapshot cost, in-emulator | the new approach's real per-frame tax | pending |
+| Restore + N-frame resim wall cost at full fastmem speed | whether a rollback burst fits | pending |
 | Full savestate save/load baseline | confirms mainline's path is unusable (expect ~11/~67 ms) | pending |
 
 ### Prerequisites (all resolved 2026-07-14)

@@ -67,17 +67,25 @@ reached only through the anonymous `CreateView` pointers (`m_ram`, `m_l1_cache`,
 write-watched memory becomes legal.** Page-table fastmem can remain on, so we do not fall all
 the way back to the slow interpreter path.
 
-Options, in preference order:
-1. **Tracked-arena mode**: with `FASTMEM_ARENA` off, back the arena with one private
-   `VirtualAlloc(MEM_WRITE_WATCH)` block and make `CreateView` return `block + offset` (pointer
-   arithmetic, no mapping). Small, contained delta to `MemArenaWin.cpp`. Costs some emulation
-   speed vs. arena fastmem — measure it, since resim frames are where we can least afford it.
-2. **Keep arena fastmem; drop OS dirty bits.** Copy guest RAM wholesale each frame (MEM1 is only
-   24 MiB → ~2.2 ms single-threaded, likely <1 ms across threads). No arena surgery at all.
-   Worth benchmarking as a serious contender if (1)'s fastmem loss proves expensive.
-3. **Slippi-style targeted region copy.** No dirty tracking; copy known MKDD gameplay regions
-   every frame. Needs a reverse-engineered MKDD memory map — the months of work we are trying to
-   avoid. Last resort.
+Options — **measured, and the ranking flipped (2026-07-14):**
+
+1. ~~**Tracked-arena mode**~~ (built and measured; **rejected for the rollback runtime**): with
+   `FASTMEM_ARENA` off, back the arena with one private `VirtualAlloc(MEM_WRITE_WATCH)` block and
+   make `CreateView` return `block + offset`. Snapshots are cheap (~0.6 ms at MKDD's ~700 dirty
+   pages/frame). **But disabling the fastmem arena costs ~7× emulation speed** — MKDD drops from
+   ~400% to ~53% of realtime (`docs/benchmarks.md`), below realtime before rollback resim is even
+   added. The cheap snapshot does not come close to paying for that. Kept in-tree as a measurement
+   tool; potentially revivable on Linux, where soft-dirty (`/proc/pid/pagemap`) tracks aliased
+   memory without disabling fastmem.
+2. **Full guest-RAM copy each frame (NOW THE PLAN).** Keep the fastmem arena fully on (stock
+   memory path, ~400% speed) and snapshot by copying MEM1 (24 MiB → ~2.2 ms/frame at 10.6 GiB/s)
+   into a ring buffer. No arena surgery, no game-specific memory map, and — the deciding factor —
+   emulation and resim run at full fastmem speed. ~4 ms emulate + ~2.2 ms copy ≈ 6.2 ms/frame,
+   well under budget. Optimizations if needed: copy across threads, or narrow the copied range
+   once a memory map exists.
+3. **Slippi-style targeted region copy.** Copy only known MKDD gameplay regions each frame. Needs
+   a reverse-engineered MKDD memory map — the months of work we are avoiding. Fallback only if
+   full-copy's per-frame tax proves too high (it should not, given the speed headroom).
 
 **Known risk (unchanged)**: mainline's savestate *load* is dominated by the PowerPC namespace
 (~55–60 ms — likely JIT/icache invalidation). The restore path must not flush the JIT cache.
