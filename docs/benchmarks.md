@@ -186,13 +186,44 @@ Full-copy sanity check: MEM1 real size is 24 MiB → ~2.2 ms/frame at 10.6 GiB/s
 speed headroom (~4 ms to emulate a frame), 4 + 2.2 = ~6.2 ms/frame — comfortably under 16.67 ms,
 and rollback resim runs at full fastmem speed.
 
+## Part 3 — Phase 1: rollback core proven deterministic
+
+Built `Core/Rollback/RollbackState`: fast full-machine capture/restore reusing Dolphin's
+`SaveToBuffer`/`LoadFromBuffer` (no compression, no disk) with the JIT cache clear skipped on
+restore (`JitInterface::DoState` now honors `Rollback::ShouldSkipJitCacheClear`). A self-test
+(`MAIN_ROLLBACK_STATE_SELFTEST`, single-core) exploits attract-mode determinism: capture at frame
+F, run K=7 frames, roll back, re-run 7 frames, and compare **guest MEM1** (the netplay-relevant
+state — not the video/audio host caches).
+
+**Result: restore-to-anchor OK and 7-frame replay determinism PASS, every iteration.** Skipping
+the JIT clear is safe for same-session rollback, and the snapshot captures everything the
+simulation needs. This is the core correctness proof the whole approach depended on.
+
+Measured cost (i9-9900KF, fastmem arena ON):
+
+| op | typical | notes |
+|---|---|---|
+| capture (full machine) | ~8–10 ms | vs Dolphin's ~11.5 ms compressed save |
+| restore + resim skipping JIT clear | ~10–18 ms | vs the ~67 ms load we were avoiding |
+| snapshot size | **90 MB** | MEM1 24 + fake-VMEM 32 + video/audio/HW — fat |
+
+The JIT-clear skip works: restore is ~10 ms, not ~67 ms. But the 90 MB snapshot (Dolphin's full
+`DoState`, not just MEM1) makes per-frame capture ~8 ms — too heavy once resim has to re-capture
+each frame. **Next: trim the snapshot toward MEM1 + CPU + essential HW (~24 MB → ~2 ms capture),
+re-running the determinism test after each trim to find the minimal deterministic set.**
+
+Determinism note: the first self-test version compared the entire 90 MB snapshot and FAILED —
+because Dolphin's video `DoState` serializes host-side caches and even writes EFB back to RAM
+during capture. Comparing guest MEM1 only is both correct (that's what must replay identically)
+and what exposed the truth.
+
 ### Still to measure (Phase 1)
 
 | Benchmark | Why it matters | Status |
 |---|---|---|
-| Full MEM1-copy snapshot cost, in-emulator | the new approach's real per-frame tax | pending |
-| Restore + N-frame resim wall cost at full fastmem speed | whether a rollback burst fits | pending |
-| Full savestate save/load baseline | confirms mainline's path is unusable (expect ~11/~67 ms) | pending |
+| Trimmed snapshot cost + determinism | get per-frame capture to ~2 ms | next |
+| Full rollback loop under simulated RTT | the Phase 1 gate | pending |
+| Full savestate save/load baseline | confirms mainline's path is unusable (~11/~67 ms) | pending |
 
 ### Prerequisites (all resolved 2026-07-14)
 
