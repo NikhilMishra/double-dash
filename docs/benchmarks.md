@@ -769,3 +769,31 @@ conditional-capture speedup, and now the state handoff — runs over real socket
 "connect and play with a friend" is connectivity: reaching the host across home NATs. First real
 games use a mesh VPN (Tailscale) or a forwarded UDP port with the `play-online.ps1 -Host` /
 `-Join <ip>` launcher; seamless connect-by-code (rendezvous + hole-punching) is the next milestone.
+
+## Part 13 — Connect-by-code: rendezvous + UDP hole-punching
+
+Direct-IP play works but makes each session a chore: someone shares an IP, someone forwards a port or
+sets up a VPN. The Slippi-style answer is connect-by-code, and it's now built.
+
+**How it works.** A small rendezvous server (`tools/rendezvous.ps1`, ~50 lines of PowerShell — no
+build, flip on/off with Ctrl+C) listens on a UDP port. Each peer sends `DDR1 REG <code> <H|G>`; the
+server records the *public* endpoint it sees (the peer's NAT-mapped address) and, once both roles are
+present for a code, replies to each with the other's endpoint (`DDR1 PEER <ip> <port>`). Both peers
+then fire UDP at each other's endpoint — the outbound packets open each NAT's mapping so the inbound
+ones get through (`NetTransport::ConnectViaRendezvous`, with a PUNCH keepalive during the handshake).
+After that it's the same handshake → wire state handoff → lockstep as before. One socket is used
+throughout, so the endpoint the server sees is the one the peer punches to.
+
+**Tested end-to-end on localhost** (rendezvous server + two instances, connecting purely by code, no
+IPs): both registered, the server paired them and swapped endpoints, they hole-punched, connected,
+streamed the 90 MB start state, and ran at **0 desyncs, 60 fps, input delay 1**. Every stage of the
+connect-by-code path is exercised except the NAT translation itself, which only two real networks can
+test.
+
+**Limits.** Simple hole-punching succeeds for the common cone NATs; two *symmetric* NATs map a new
+port per destination, so the server-observed endpoint isn't the peer-reachable one — those need a
+relay (TURN-style), which is the next networking addition. The rendezvous host must be reachable
+(public IP, forwarded port, or a shared VPN address).
+
+Launcher: `rendezvous.ps1` on the server; `play-online.ps1 -Host -Code <code> -Rendezvous <ip>` and
+`play-online.ps1 -Code <code> -Rendezvous <ip>` on the two players.

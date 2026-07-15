@@ -22,7 +22,10 @@
 
 param(
   [Alias('Host')][switch]$AsHost,   # -Host: this machine hosts (drives P1) and streams the start state
-  [string]$Join = "",               # the host's IP to connect to (this machine drives P2)
+  [string]$Join = "",               # direct mode: the host's IP to connect to (this machine drives P2)
+  [string]$Code = "",               # connect-by-code: shared session code (both peers use the same one)
+  [string]$Rendezvous = "",         # connect-by-code: the rendezvous server's IP (running rendezvous.ps1)
+  [int]$RendezvousPort = 7778,
   [string]$Game = "$PSScriptRoot\..\Mario Kart - Double Dash!! (USA).rvz",
   [int]$InputDelay = 3,             # ~50 ms; covers a same-region ping. Lower for low ping, raise for high
   [int]$Port = 7777
@@ -30,11 +33,21 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if (-not $AsHost -and [string]::IsNullOrEmpty($Join)) {
-  throw "Specify a role: -Host  (to host), or  -Join <host IP>  (to join). See the header for setup."
+$codeMode = -not [string]::IsNullOrEmpty($Code)
+if ($codeMode) {
+  # Connect-by-code: role is host if -Host, else joiner. Both give the same -Code and -Rendezvous.
+  if ([string]::IsNullOrEmpty($Rendezvous)) {
+    throw "Connect-by-code needs -Rendezvous <server IP> (the machine running rendezvous.ps1)."
+  }
 }
-if ($AsHost -and -not [string]::IsNullOrEmpty($Join)) {
-  throw "Pass either -Host or -Join, not both."
+else {
+  # Direct mode: exactly one of -Host / -Join <ip>.
+  if (-not $AsHost -and [string]::IsNullOrEmpty($Join)) {
+    throw "Specify -Host, or -Join <host IP>, or -Code <code> -Rendezvous <server IP>. See the header."
+  }
+  if ($AsHost -and -not [string]::IsNullOrEmpty($Join)) {
+    throw "Pass either -Host or -Join, not both."
+  }
 }
 
 $exe = Join-Path $PSScriptRoot "..\dolphin\Binary\x64\Dolphin.exe"
@@ -111,11 +124,21 @@ $dolArgs = @(
   '-C','Dolphin.Core.SlotB=255',
   '-C','Dolphin.Core.SerialPort1=255'
 )
-if (-not $AsHost) { $dolArgs += @('-C',"Dolphin.Core.RollbackNetPeer=$Join") }
+if ($codeMode) {
+  $dolArgs += @('-C',"Dolphin.Core.RollbackNetCode=$Code",
+                '-C',"Dolphin.Core.RollbackNetRendezvous=$Rendezvous",
+                '-C',"Dolphin.Core.RollbackNetRendezvousPort=$RendezvousPort")
+}
+elseif (-not $AsHost) {
+  $dolArgs += @('-C',"Dolphin.Core.RollbackNetPeer=$Join")
+}
 $dolArgs += @('-e',"`"$Game`"")
 
 Write-Host "Starting $label on UDP $Port ..." -ForegroundColor Cyan
-if ($AsHost) {
+if ($codeMode) {
+  Write-Host "Connect-by-code: code '$Code' via rendezvous $Rendezvous`:$RendezvousPort."
+  Write-Host "Both players must use the SAME code and rendezvous server."
+} elseif ($AsHost) {
   Write-Host "Waiting for your friend to join. Share your IP (Tailscale IP, or public IP if port-forwarded)."
 } else {
   Write-Host "Connecting to host at $Join ..."

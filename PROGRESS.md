@@ -95,13 +95,22 @@ needs — transport, determinism, the speedups, and now the state handoff — ru
 Two launchers: `play-local.ps1` (two windows on one PC) and `play-online.ps1 -Host` / `-Join <ip>`
 (one instance per machine).
 
-## Next — connect and play with a friend
+## Connect-by-code — built ✅
 
-What's left is **connectivity** — reaching the host across home routers (NAT):
-1. **First real games:** a mesh VPN (Tailscale) or a forwarded UDP port — works with the launcher today.
-2. **Seamless connect-by-code** (the Slippi-style goal): a small rendezvous server + UDP hole-punching
-   so you just swap a code. This is the next build.
-3. Real-network hardening (sustained loss/jitter/reconnect) once it's running between two homes.
+The Slippi-style flow is in: a tiny **rendezvous server** (`tools/rendezvous.ps1` — no build, flip on/off
+with Ctrl+C) pairs two players by a shared **code** and swaps their addresses so they **hole-punch** a
+direct connection through home routers. No IPs or port-forwarding for the players. Verified end-to-end on
+localhost (pair → punch → connect → stream state → lockstep, 0 desyncs).
+
+Launchers: run `rendezvous.ps1` on a reachable machine, then
+`play-online.ps1 -Host -Code <code> -Rendezvous <server IP>` and `play-online.ps1 -Code <code> -Rendezvous <server IP>`.
+
+## Next
+
+1. **A real game between two networks** — the one thing that can't be tested from a single machine
+   (actual NAT traversal + internet latency/jitter/loss). This is the true proof.
+2. **Relay fallback** for two symmetric NATs, where plain hole-punching can't connect.
+3. Reconnect / sustained-loss hardening once it's running between two homes.
 
 ---
 
