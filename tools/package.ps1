@@ -20,6 +20,10 @@ if (-not (Test-Path (Join-Path $binx "Dolphin.exe"))) {
   throw "Build not found at $binx -- build the fork (Release x64) first."
 }
 
+# Compile the double-click GUI launcher (DoubleDashOnline.exe) into the build folder so it ships in
+# the zip. Uses the in-box C# compiler -- nothing to install.
+& (Join-Path $PSScriptRoot "build-launcher.ps1")
+
 # Fresh staging.
 if (Test-Path $pkg) { Remove-Item -Recurse -Force $pkg }
 New-Item -ItemType Directory -Force -Path $pkg | Out-Null
