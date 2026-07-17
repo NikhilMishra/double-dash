@@ -55,6 +55,37 @@ namespace DoubleDashOnline
       BuildUi();
       LoadConfig();
       UpdateJoinEnabled();
+      WarnIfMisplaced();
+    }
+
+    private bool DolphinPresent()
+    {
+      return File.Exists(_dolphinPath);
+    }
+
+    // Shown when Dolphin.exe isn't beside the launcher -- the #1 support issue (running the lone exe,
+    // or launching it straight from the zip so Windows runs a lone temp copy).
+    private string InstallHelpText()
+    {
+      string msg =
+        "This launcher can't find Dolphin.exe next to it, so it can't start the game.\r\n\r\n" +
+        "It's running from:\r\n" + _exeDir + "\r\n\r\n";
+      string lower = _exeDir.ToLowerInvariant();
+      if (lower.Contains("\\temp\\") || lower.Contains("\\appdata\\local\\temp"))
+        msg += "That looks like a temporary folder -- you probably launched the .exe straight from " +
+               "inside the ZIP, which copies only that one file. \r\n\r\n";
+      msg +=
+        "Fix: right-click DoubleDashOnline.zip -> Extract All. Open the extracted DoubleDashOnline " +
+        "folder and run DoubleDashOnline.exe from IN there. Every file in that folder must stay " +
+        "together -- the launcher needs Dolphin.exe and the Sys folder right beside it.";
+      return msg;
+    }
+
+    private void WarnIfMisplaced()
+    {
+      if (!DolphinPresent())
+        SetStatus("Can't find Dolphin.exe next to me -- extract the WHOLE folder from the zip and run " +
+                  "me from inside it. (Click Play for details.)");
     }
 
     private void BuildUi()
@@ -216,9 +247,10 @@ namespace DoubleDashOnline
 
     private void OnPlay(object sender, EventArgs e)
     {
-      if (!File.Exists(_dolphinPath))
+      if (!DolphinPresent())
       {
-        SetStatus("Dolphin.exe isn't next to this launcher. Keep all the files together.");
+        MessageBox.Show(this, InstallHelpText(), "Double Dash Online -- files got separated",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
         return;
       }
       string game = _gameBox.Text.Trim();

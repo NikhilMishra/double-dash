@@ -18,9 +18,13 @@ WHAT YOU NEED
 4. Tailscale (free mesh VPN, tailscale.com). You and your friend both install it once; it puts you
    on the same private network with no router setup.
 
-HOW TO PLAY  --  just double-click DoubleDashOnline.exe
-------------------------------------------------------
-1. Double-click  DoubleDashOnline.exe
+HOW TO PLAY
+-----------
+0. EXTRACT FIRST. Right-click the zip -> "Extract All". Then open the extracted DoubleDashOnline
+   folder and run the launcher from IN there. Do NOT double-click the .exe while it's still inside
+   the zip, and do NOT copy the .exe out on its own -- it needs Dolphin.exe and the Sys folder right
+   beside it, or you'll get "can't find Dolphin.exe".
+1. Double-click  DoubleDashOnline.exe  (inside the extracted folder)
 2. Click "Browse..." and pick your own MKDD dump (it remembers it next time).
 3. One of you clicks "Host"; the other clicks "Join" and pastes the host's Tailscale IP.
       - The host's window shows the exact IP to send -- just copy it to your friend.
