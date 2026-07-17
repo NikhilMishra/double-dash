@@ -41,7 +41,15 @@ low; raise it (4+) if the connection is rough. Both players should use the SAME 
 
 TROUBLESHOOTING
 ---------------
-- First launch may pop a Windows Firewall prompt -- allow it (Private AND Public).
+- BOTH SIDES "TIME OUT" / "can't reach your friend"? Two things to check on the HOST'S machine:
+    1. Firewall: run  allow-firewall.cmd  once (double-click, click Yes). This lets the host receive
+       connections (inbound UDP 7777). Without it, the joiner's packets are dropped and both time out.
+       (The first-launch Windows Firewall prompt does the same thing IF you allow Private AND Public --
+       but allow-firewall.cmd is the reliable way.)
+    2. Tailscale: you must both be on the SAME tailnet. On the host run  tailscale status  -- you should
+       see your FRIEND'S machine listed, not just your own. If you don't, invite them to your tailnet
+       (Tailscale admin console -> add/share), or have them log in to the same account. The joiner must
+       use the host's Tailscale IP (host: run  tailscale ip -4 ). Confirm with  tailscale ping <their-ip>.
 - "Game files don't match" = you and your friend have different MKDD dumps. You each need a
   byte-identical USA dump.
 - Controller not moving? Click the game window so it's focused.
