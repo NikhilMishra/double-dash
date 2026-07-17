@@ -27,6 +27,7 @@ namespace DoubleDashOnline
     private RadioButton _joinRadio;
     private Label _joinLabel;
     private TextBox _joinBox;
+    private ComboBox _inputBox;
     private NumericUpDown _delayBox;
     private Button _playBtn;
     private Button _stopBtn;
@@ -62,7 +63,7 @@ namespace DoubleDashOnline
       FormBorderStyle = FormBorderStyle.FixedSingle;
       MaximizeBox = false;
       StartPosition = FormStartPosition.CenterScreen;
-      ClientSize = new Size(460, 430);
+      ClientSize = new Size(460, 466);
       Font = new Font("Segoe UI", 9f);
 
       int x = 16, w = 428, y = 14;
@@ -115,6 +116,20 @@ namespace DoubleDashOnline
       _joinBox.SetBounds(x + 160, y, w - 160, 24);
       Controls.Add(_joinBox);
       y += 38;
+
+      Label lin = new Label();
+      lin.Text = "Your input:";
+      lin.SetBounds(x, y + 3, 84, 18);
+      Controls.Add(lin);
+
+      _inputBox = new ComboBox();
+      _inputBox.DropDownStyle = ComboBoxStyle.DropDownList;
+      _inputBox.Items.Add("Xbox controller");
+      _inputBox.Items.Add("Keyboard");
+      _inputBox.SelectedIndex = 0;
+      _inputBox.SetBounds(x + 90, y, 200, 24);
+      Controls.Add(_inputBox);
+      y += 34;
 
       Label l3 = new Label();
       l3.Text = "Input delay (raise if the connection is rough):";
@@ -257,7 +272,7 @@ namespace DoubleDashOnline
       _playBtn.Enabled = false;
       _stopBtn.Enabled = true;
       _browseBtn.Enabled = false;
-      _hostRadio.Enabled = _joinRadio.Enabled = _joinBox.Enabled = _delayBox.Enabled = false;
+      _hostRadio.Enabled = _joinRadio.Enabled = _joinBox.Enabled = _inputBox.Enabled = _delayBox.Enabled = false;
 
       if (host)
       {
@@ -287,7 +302,7 @@ namespace DoubleDashOnline
         _playBtn.Enabled = true;
         _stopBtn.Enabled = false;
         _browseBtn.Enabled = true;
-        _hostRadio.Enabled = _joinRadio.Enabled = _delayBox.Enabled = true;
+        _hostRadio.Enabled = _joinRadio.Enabled = _inputBox.Enabled = _delayBox.Enabled = true;
         UpdateJoinEnabled();
         if (!_inGame)
           SetStatus("The game closed before connecting. Make sure your friend started too, " +
@@ -403,19 +418,39 @@ namespace DoubleDashOnline
         "[Options]\r\nVerbosity = 4\r\nWriteToFile = True\r\nWriteToConsole = False\r\n" +
         "WriteToWindow = False\r\n[Logs]\r\nMI = True\r\nCORE = True\r\n", Encoding.ASCII);
 
-      string dev = "XInput/0/Gamepad";
-      string body =
-        "Buttons/A = `Button A`\r\nButtons/B = `Button B`\r\nButtons/X = `Button X`\r\n" +
-        "Buttons/Y = `Button Y`\r\nButtons/Z = `Shoulder R`\r\nButtons/Start = `Start`\r\n" +
-        "Main Stick/Up = `Left Y+`\r\nMain Stick/Down = `Left Y-`\r\nMain Stick/Left = `Left X-`\r\n" +
-        "Main Stick/Right = `Left X+`\r\n" +
-        "Main Stick/Calibration = 100.00 141.42 100.00 141.42 100.00 141.42 100.00 141.42\r\n" +
-        "C-Stick/Up = `Right Y+`\r\nC-Stick/Down = `Right Y-`\r\nC-Stick/Left = `Right X-`\r\n" +
-        "C-Stick/Right = `Right X+`\r\n" +
-        "C-Stick/Calibration = 100.00 141.42 100.00 141.42 100.00 141.42 100.00 141.42\r\n" +
-        "Triggers/L = `Trigger L`\r\nTriggers/R = `Trigger R`\r\n" +
-        "Triggers/L-Analog = `Trigger L`\r\nTriggers/R-Analog = `Trigger R`\r\n" +
-        "D-Pad/Up = `Pad N`\r\nD-Pad/Down = `Pad S`\r\nD-Pad/Left = `Pad W`\r\nD-Pad/Right = `Pad E`\r\n";
+      bool keyboard = _inputBox != null && _inputBox.SelectedIndex == 1;
+      string dev, body;
+      if (keyboard)
+      {
+        // DInput keyboard; key names verified against Dolphin's NamedKeys.h. Steering is digital
+        // (arrow keys) -- playable, but less smooth than an analog stick.
+        dev = "DInput/0/Keyboard Mouse";
+        body =
+          "Buttons/A = `Z`\r\nButtons/B = `X`\r\nButtons/X = `C`\r\nButtons/Y = `V`\r\n" +
+          "Buttons/Z = `SPACE`\r\nButtons/Start = `RETURN`\r\n" +
+          "Main Stick/Up = `UP`\r\nMain Stick/Down = `DOWN`\r\nMain Stick/Left = `LEFT`\r\n" +
+          "Main Stick/Right = `RIGHT`\r\n" +
+          "Main Stick/Calibration = 100.00 141.42 100.00 141.42 100.00 141.42 100.00 141.42\r\n" +
+          "Triggers/L = `LSHIFT`\r\nTriggers/R = `LCONTROL`\r\n" +
+          "Triggers/L-Analog = `LSHIFT`\r\nTriggers/R-Analog = `LCONTROL`\r\n" +
+          "D-Pad/Up = `T`\r\nD-Pad/Down = `G`\r\nD-Pad/Left = `F`\r\nD-Pad/Right = `H`\r\n";
+      }
+      else
+      {
+        dev = "XInput/0/Gamepad";
+        body =
+          "Buttons/A = `Button A`\r\nButtons/B = `Button B`\r\nButtons/X = `Button X`\r\n" +
+          "Buttons/Y = `Button Y`\r\nButtons/Z = `Shoulder R`\r\nButtons/Start = `Start`\r\n" +
+          "Main Stick/Up = `Left Y+`\r\nMain Stick/Down = `Left Y-`\r\nMain Stick/Left = `Left X-`\r\n" +
+          "Main Stick/Right = `Left X+`\r\n" +
+          "Main Stick/Calibration = 100.00 141.42 100.00 141.42 100.00 141.42 100.00 141.42\r\n" +
+          "C-Stick/Up = `Right Y+`\r\nC-Stick/Down = `Right Y-`\r\nC-Stick/Left = `Right X-`\r\n" +
+          "C-Stick/Right = `Right X+`\r\n" +
+          "C-Stick/Calibration = 100.00 141.42 100.00 141.42 100.00 141.42 100.00 141.42\r\n" +
+          "Triggers/L = `Trigger L`\r\nTriggers/R = `Trigger R`\r\n" +
+          "Triggers/L-Analog = `Trigger L`\r\nTriggers/R-Analog = `Trigger R`\r\n" +
+          "D-Pad/Up = `Pad N`\r\nD-Pad/Down = `Pad S`\r\nD-Pad/Left = `Pad W`\r\nD-Pad/Right = `Pad E`\r\n";
+      }
       string section = "Device = " + dev + "\r\n" + body;
       File.WriteAllText(Path.Combine(cfg, "GCPadNew.ini"),
         "[GCPad1]\r\n" + section + "[GCPad2]\r\n" + section, Encoding.ASCII);
@@ -476,7 +511,7 @@ namespace DoubleDashOnline
       _playBtn.Enabled = true;
       _stopBtn.Enabled = false;
       _browseBtn.Enabled = true;
-      _hostRadio.Enabled = _joinRadio.Enabled = _delayBox.Enabled = true;
+      _hostRadio.Enabled = _joinRadio.Enabled = _inputBox.Enabled = _delayBox.Enabled = true;
       UpdateJoinEnabled();
     }
 
@@ -505,6 +540,8 @@ namespace DoubleDashOnline
             _joinBox.Text = v;
           else if (k == "mode" && v == "join")
             _joinRadio.Checked = true;
+          else if (k == "input" && v == "keyboard")
+            _inputBox.SelectedIndex = 1;
         }
       }
       catch { }
@@ -518,6 +555,7 @@ namespace DoubleDashOnline
       sb.Append("delay=").Append((int)_delayBox.Value).Append("\r\n");
       sb.Append("join=").Append(_joinBox.Text.Trim()).Append("\r\n");
       sb.Append("mode=").Append(_hostRadio.Checked ? "host" : "join").Append("\r\n");
+      sb.Append("input=").Append(_inputBox.SelectedIndex == 1 ? "keyboard" : "pad").Append("\r\n");
       File.WriteAllText(_cfgPath, sb.ToString(), Encoding.ASCII);
     }
   }

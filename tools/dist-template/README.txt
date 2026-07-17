@@ -11,7 +11,10 @@ WHAT YOU NEED
 2. YOUR OWN copy of the game: a byte-identical Mario Kart Double Dash (USA) dump (.rvz/.iso/.gcm),
    dumped from your own disc. It must match your friend's copy exactly, or the game desyncs. The
    game file is NOT included -- each player brings their own.
-3. A controller (an Xbox pad works out of the box).
+3. A controller (an Xbox pad works out of the box) -- OR just your keyboard: pick "Keyboard" from
+   the Input dropdown in the launcher. Default keys: arrow keys steer, Z accelerate, X brake,
+   Shift/Ctrl drift (L/R), Space item (Z), Enter start. (Keyboard steering is on/off rather than
+   analog -- fine to play, just less smooth than a stick.)
 4. Tailscale (free mesh VPN, tailscale.com). You and your friend both install it once; it puts you
    on the same private network with no router setup.
 
